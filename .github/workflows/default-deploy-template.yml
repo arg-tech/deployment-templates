@@ -1,0 +1,1013 @@
+name: Deploy template
+on:
+  workflow_call:
+    inputs:
+      target_production_server_nickname:
+        required: true
+        type: string
+      full_app_url:
+        required: true
+        type: string
+      app_port:
+        required: true
+        type: string
+    secrets:
+      DEPLOYMENT_AGENT_API_KEY_STAGING:
+        required: true
+      DEPLOYMENT_AGENT_API_KEY_ARGAND:
+        required: false
+      DEPLOYMENT_AGENT_API_KEY_GODEL:
+        required: false
+      DEPLOYMENT_AGENT_API_KEY_AIFDB_SERVER:
+        required: false
+      DEPLOYMENT_AGENT_FORWARD_KEY:
+        required: false
+      deploy_user_read_token:
+        required: true
+
+env:
+  # Syntax for workflow names is: job-name-in-caller-workflow / job-name-in-this-workflow https://stackoverflow.com/questions/71240338/
+  STAGING_WORKFLOW_NAME: Environments / Staging
+  PRODUCTION_WORKFLOW_NAME: Environments / Production
+  SLACK_CHANNEL_ID: C072R6HPW21
+  REQUIRED_VERSION: "1.0"
+
+jobs:
+  deploy-staging:
+    timeout-minutes: 30
+    name: "Staging"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest    
+    steps:
+      - name: Check subdomain and port uniqueness
+        id: domain-and-port-checks
+        # Allow resource lister to skip since it's checking itself
+        if: github.repository != 'arg-tech/resource-lister'
+        run: |
+          echo "🌐 Verifying availability of ${{ inputs.full_app_url }} (port ${{ inputs.app_port }}) on ${{ inputs.target_production_server_nickname }}"
+          set -euo pipefail
+
+          if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
+              resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
+          elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
+              resource_lister_url="http://resource-lister.godel.arg.tech/get-sites"
+          elif [[ "${{ inputs.target_production_server_nickname }}" == "aifdb-server" ]]; then
+              resource_lister_url="http://resource-lister.aifdb-server.arg.tech/get-sites"
+          else
+              echo "::error::❌ Invalid server nickname: ${{ inputs.target_production_server_nickname }}"
+              exit 1;
+          fi
+
+          deployed_services=$(curl --no-progress-meter $resource_lister_url)
+
+          services_with_matching_repo_name=$(echo $deployed_services | jq '.[] | select(.repository == "${{ github.event.repository.name }}")')
+          services_with_matching_domain=$(echo $deployed_services | jq '.[] | select(.domain == "${{ inputs.full_app_url }}")')
+          services_with_matching_port=$(echo $deployed_services | jq '.[] | select(.port == "${{ inputs.app_port }}")')
+
+          if [[ -n "$services_with_matching_repo_name" ]]
+          then
+              echo "ℹ️ Found an existing deployment for ${{ github.event.repository.name }}"
+              
+              if [[ -n "$services_with_matching_port" && "$services_with_matching_repo_name" != "$services_with_matching_port" ]]; then
+                  echo "::error::❌ Port ${{ inputs.app_port }} is already in use by another service"
+                  exit 1;
+              fi
+
+              if [[ "$services_with_matching_repo_name" != "$services_with_matching_domain" ]]; then
+                  echo "::error::❌ Cannot change subdomain for existing deployment"
+                  exit 1;
+              fi
+          else
+              echo "ℹ️ No existing deployment found for ${{ github.event.repository.name }}"
+
+              if [[ -n "$services_with_matching_domain" || -n "$services_with_matching_port" ]]; then
+                  echo "::error::❌ The requested domain or port is already in use by another service"
+                  exit 1;
+              fi
+          fi
+
+          echo "✅ Domain and port checks passed"
+
+      - name: Identify and validate deployment agent
+        id: identify-deployment-agent
+        run: |
+          echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
+
+          deployment_agent_url="https://deployment-agent.staging.arg.tech"
+          echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
+          echo "ℹ️ Deployment agent URL: $deployment_agent_url"
+          
+          response=$(curl -k --show-error --no-progress-meter \
+            -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
+            "$deployment_agent_url/health")
+          
+          if ! echo "$response" | jq -e . > /dev/null 2>&1; then
+            echo "::error::❌ Invalid JSON response from health check"
+            exit 1
+          fi
+          
+          agent_version=$(echo "$response" | jq -r '.version // empty')
+          agent_status=$(echo "$response" | jq -r '.status // empty')
+          
+          if [ -z "$agent_version" ] || [ -z "$agent_status" ]; then
+            echo "::error::❌ Missing version or status in response"
+            exit 1
+          fi
+          
+          if [ "$agent_status" != "healthy" ]; then
+            echo "::error::❌ Deployment agent is not healthy"
+            exit 1
+          fi
+          
+          if [ "$agent_version" != "${{ env.REQUIRED_VERSION }}" ]; then
+            echo "::error::❌ Version mismatch - Required: ${{ env.REQUIRED_VERSION }}, Found: $agent_version"
+            exit 1
+          fi
+          
+          echo "ℹ️ Deployment agent version: $agent_version"
+          echo "✅ Deployment agent version check passed"
+
+      - name: Pull latest code
+        id: pull-code
+        run: |
+          echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
+          set -euo pipefail
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
+            -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "branch_name": "${{ github.head_ref }}"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+          echo "✅ Repository successfully pulled"
+
+      - name: Create staging secrets
+        id: create-secrets
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        run: |
+          echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
+          set -euo pipefail
+
+          staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("STAGING_")) | {(.key): .value}) | add // {}' -c)
+          request_body=$(jq -n \
+            --arg repo "${{ github.event.repository.name }}" \
+            --arg secrets "$staging_secrets" \
+            '{repository_name: $repo, secrets_context: $secrets}')
+          
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
+            -d "$request_body" \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+          echo "✅ Secrets created successfully"
+
+      - name: Check if up-to-date with main
+        id: check-main-sync
+        if: github.base_ref == 'main'
+        run: |
+          echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
+          set -euo pipefail
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "branch_name": "${{ github.head_ref }}",
+              "commit_sha": "${{ github.event.pull_request.head.sha }}"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url}}/check-main-sync | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+          echo "✅ Branch is up to date with main"
+
+      - name: Build containers
+        id: build-containers
+        run: |
+          echo "🏗️ Building containers for ${{ github.event.repository.name }}"
+          set -euo pipefail
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "🔨 $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Build failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+      - name: Convert production subdomain to staging subdomain
+        id: convert-subdomain
+        run: |
+          echo "🔄 Converting production subdomain to staging subdomain"
+          
+          # Handle special case for resource-lister
+          if [[ "${{ github.event.repository.name }}" == "resource-lister" ]]; then
+            staging_domain="resource-lister.staging.arg.tech"
+          # Handle special case for logs-agent
+          elif [[ "${{ github.event.repository.name }}" == "dozzle-logs-agent" ]]; then
+            staging_domain="logs-agent.staging.arg.tech"
+          # Handle special case for aifdb-corpora
+          elif [[ "${{ github.event.repository.name }}" == "aifdb-corpora" ]]; then
+            staging_domain="corpora.staging.arg.tech"
+          # Handle special case for aifdb-production
+          elif [[ "${{ github.event.repository.name }}" == "aifdb-production" ]]; then
+            staging_domain="aifdb2.staging.arg.tech"
+          # If domain ends with .arg.tech, insert staging. before .arg.tech
+          elif [[ "${{ inputs.full_app_url }}" == *.arg.tech ]]; then
+            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/\.arg\.tech$/.staging.arg.tech/')
+          # Otherwise append .staging.arg.tech to the full domain  
+          else
+            staging_domain="${{ inputs.full_app_url }}.staging.arg.tech"
+          fi
+          
+          echo "staging_domain=$staging_domain" >> "$GITHUB_OUTPUT"
+          echo "Staging domain is: $staging_domain"
+
+      - name: Provision new subdomain
+        id: provision-subdomain
+        run: |
+          echo "🚀 Provisioning new subdomain for ${{ github.event.repository.name }}"
+          set -euo pipefail
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "${{ steps.convert-subdomain.outputs.staging_domain }}",
+              "port": "${{ inputs.app_port }}"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "success")
+                  if [[ $content == *"nginx configuration reloaded"* ]]; then
+                    echo "✅ Nginx configuration updated and reloaded successfully"
+                    echo "🌐 Subdomain is now available at: http://${{ steps.convert-subdomain.outputs.staging_domain }}"
+                  else
+                    echo "✅ $content"
+                  fi
+                  ;;
+                "error")
+                  if [[ $content == *"nginx configuration test failed"* ]]; then
+                    echo "::error::❌ Nginx configuration test failed - please contact IWG"
+                  elif [[ $content == *"different repository"* ]]; then
+                    echo "::error::❌ Domain conflict: $content"
+                  else
+                    echo "::error::❌ $content"
+                  fi
+                  exit 1
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+      - name: Get build details URL
+        uses: actions/github-script@v7
+        continue-on-error: true
+        if: always()
+        id: get-job-url
+        with:
+          script: |
+            const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            html_url = workflow_run.jobs.find((job) => job.name === "${{env.STAGING_WORKFLOW_NAME}}").html_url
+            html_url += "?pr=${{github.event.pull_request.number}}"
+            console.log(`URL is ${html_url}`)
+            return html_url
+          result-encoding: string
+
+      - name: Compose ending message
+        id: compose-ending-message
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |    
+            console.log(`Job status: ${{ job.status }}`)        
+            const message = (`${{ job.status }}` === 'failure')
+              ? `
+              **Build (#${{github.run_number}}) failed to deploy to staging** ❌
+                  \- Please check the [build log](${{steps.get-job-url.outputs.result}}) for details.
+
+              **Note:** Once you correct the error, simply push the new commit to the same branch and it will automatically re-deploy to staging.
+              ` : `
+              **New build (#${{github.run_number}}) deployed to staging** 🚧
+                  \- Test it on the staging URL: [${{steps.convert-subdomain.outputs.staging_domain}}](http://${{steps.convert-subdomain.outputs.staging_domain}})
+                  \- If you update the PR or create another one, a new build will be created, replacing this one
+                  \- [View build log](${{steps.get-job-url.outputs.result}})
+                      
+              **Note:** If this PR is to main, only authorized users will be allowed to merge. Once merged to main, the build will be promoted to the production server. Ensure the staging build works correctly before merging. 
+              `
+            return message;
+
+      - name: Comment on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `${{steps.compose-ending-message.outputs.result}}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
+
+      # https://app.slack.com/block-kit-builder https://www.text-utils.com/json-formatter/
+      - name: Post update to Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{env.SLACK_CHANNEL_ID}}
+          payload: >
+                {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*Staging or production:* Staging \n *Outcome:* ${{ job.status }}"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
+
+  deploy-production:
+    timeout-minutes: 30
+    name: "Production"
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identify and validate deployment agent
+        id: identify-deployment-agent
+        run: |
+          echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
+           
+          case "${{ inputs.target_production_server_nickname }}" in
+             "argand")
+              deployment_agent_url="https://deployment-agent.argand.arg.tech";
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
+              api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"; ;;
+            "godel") 
+              deployment_agent_url="https://deployment-agent.godel.arg.tech"
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
+              api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"; ;;
+            "aifdb-server")
+              deployment_agent_url="https://deployment-agent.aifdb-server.arg.tech"
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_AIFDB_SERVER }}"
+              api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_AIFDB_SERVER }}"; ;;
+            *) 
+              echo "::error::❌ Invalid server nickname"; 
+              exit 1 ;;
+          esac
+
+          echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
+          echo "ℹ️ Deployment agent URL: $deployment_agent_url"
+          
+          response=$(curl -k --show-error --no-progress-meter \
+            -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
+            "$deployment_agent_url/health")
+          
+          if ! echo "$response" | jq -e . > /dev/null 2>&1; then
+            echo "::error::❌ Invalid JSON response from health check"
+            exit 1
+          fi
+          
+          agent_version=$(echo "$response" | jq -r '.version // empty')
+          agent_status=$(echo "$response" | jq -r '.status // empty')
+          
+          if [ -z "$agent_version" ] || [ -z "$agent_status" ]; then
+            echo "::error::❌ Missing version or status in response"
+            exit 1
+          fi
+          
+          if [ "$agent_status" != "healthy" ]; then
+            echo "::error::❌ Deployment agent is not healthy"
+            exit 1
+          fi
+          
+          if [ "$agent_version" != "${{ env.REQUIRED_VERSION }}" ]; then
+            echo "::error::❌ Version mismatch - Required: ${{ env.REQUIRED_VERSION }}, Found: $agent_version"
+            exit 1
+          fi
+
+          if [[ -z "$api_key" ]]; then
+            echo "::error::❌ No API key found for ${{ inputs.target_production_server_nickname }}. Ensure you've been granted permission to deploy to this server."
+            exit 1
+          fi
+          echo "api_key=$api_key" >> "$GITHUB_OUTPUT"
+          
+          echo "ℹ️ Deployment agent version: $agent_version"
+          echo "✅ Deployment agent version check passed"
+
+      - name: Get PR number
+        uses: actions/github-script@v7
+        id: get-pr-number
+        with:
+          script: |
+            return (await
+              github.rest.repos.listPullRequestsAssociatedWithCommit({
+                commit_sha: context.sha,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              })).data[0].number;
+          result-encoding: string
+
+      - name: Get build details URL
+        uses: actions/github-script@v7
+        continue-on-error: true
+        id: get-job-url
+        with:
+          script: |
+            const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            html_url = workflow_run.jobs.find((job) => job.name === "${{env.PRODUCTION_WORKFLOW_NAME}}").html_url
+            html_url += "?pr=${{steps.get-pr-number.outputs.result}}"
+            console.log(`URL is ${html_url}`)
+            return html_url
+          result-encoding: string
+
+      - name: Comment on PR (started build)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: ${{steps.get-pr-number.outputs.result}},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: ` 
+              **In progress: build being promoted to production** 🏗️ 
+                \- Target server: ${{inputs.target_production_server_nickname}}
+                \- [View build log](${{steps.get-job-url.outputs.result}})
+              `
+            })
+
+      # https://app.slack.com/block-kit-builder https://www.text-utils.com/json-formatter/
+      - name: Post update to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{env.SLACK_CHANNEL_ID}}
+          payload: >
+                {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*In progress: build being promoted to production* 🏗️"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
+
+      - name: Pull latest code
+        id: pull-code-prod
+        run: |
+          echo "📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}"
+          set -euo pipefail
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
+            -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "branch_name": "main"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+          echo "✅ Repository successfully pulled"
+
+      - name: Create production secrets
+        id: create-secrets-prod
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        run: |
+          echo "🔐 Setting up production secrets for ${{ github.event.repository.name }}"
+          set -euo pipefail
+
+          production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("PRODUCTION_")) | {(.key): .value}) | add // {}' -c)
+          request_body=$(jq -n \
+            --arg repo "${{ github.event.repository.name }}" \
+            --arg secrets "$production_secrets" \
+            '{repository_name: $repo, secrets_context: $secrets}')
+          
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
+            -d "$request_body" \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+          echo "✅ Production secrets created successfully"
+
+      - name: Build containers
+        id: build-containers-prod
+        run: |
+          echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
+          set -euo pipefail
+          
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "🔨 $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Build failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+      - name: Provision new subdomain
+        id: provision-subdomain-prod
+        run: |
+          echo "🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})"
+          set -euo pipefail
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "${{ inputs.full_app_url }}",
+              "port": "${{ inputs.app_port }}"
+            }' \
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "success")
+                  if [[ $content == *"nginx configuration reloaded"* ]]; then
+                    echo "✅ Nginx configuration updated and reloaded successfully"
+                    echo "🌐 Production URL is now available at: http://${{ inputs.full_app_url }}"
+                  else
+                    echo "✅ $content"
+                  fi
+                  ;;
+                "error")
+                  if [[ $content == *"nginx configuration test failed"* ]]; then
+                    echo "::error::❌ Nginx configuration test failed - please contact IWG"
+                  elif [[ $content == *"different repository"* ]]; then
+                    echo "::error::❌ Domain conflict: $content"
+                  else
+                    echo "::error::❌ $content"
+                  fi
+                  exit 1
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+      - name: Forward new subdomain to Godel
+        if: ${{ inputs.target_production_server_nickname == 'godel' }}
+        run: |
+          echo "➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)"
+          set -euo pipefail
+
+          if [[ -z "${{ secrets.DEPLOYMENT_AGENT_FORWARD_KEY }}" ]]; then
+            echo "::error::❌ No forwarding key found. Ensure you've been granted access to the key."
+            exit 1
+          fi
+
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_FORWARD_KEY }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "${{ inputs.full_app_url }}",
+              "target_server": "godel"
+            }' \
+            https://deployment-agent.argand.arg.tech/forward-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "success")
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+
+      - name: Comment on PR (finished build)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: ${{steps.get-pr-number.outputs.result}},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: ` 
+              **Build deployed to production** 🏠 
+                \- Target server: ${{inputs.target_production_server_nickname}}
+                \- Your app's URL: [${{inputs.full_app_url}}](http://${{inputs.full_app_url}})
+                \- Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts
+                \- [View build log](${{steps.get-job-url.outputs.result}})
+              `
+            })
+
+      # https://app.slack.com/block-kit-builder https://www.text-utils.com/json-formatter/
+      - name: Post update to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{env.SLACK_CHANNEL_ID}}
+          payload: >
+                {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*Build deployed to production* 🏠 \n - Target server: ${{inputs.target_production_server_nickname}} \n - Your app's URL: ${{inputs.full_app_url}} \n - Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
+      - name: Remove artifacts from staging server
+        if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
+        run: |
+          echo "🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}"
+          set -euo pipefail
+          
+          # Store the staging domain for easier reference
+          staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
+          echo "ℹ️ Target staging domain: $staging_domain"
+          
+          # Execute curl with proper error handling
+          curl -k -N --no-progress-meter --fail -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
+            -d "{
+              \"repository_name\": \"${{ github.event.repository.name }}\",
+              \"full_domain\": \"$staging_domain\"
+            }" \
+            https://deployment-agent.staging.arg.tech/delete-deployed-service | while IFS= read -r line || [[ -n "$line" ]]; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
+              
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
+              fi
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::warning title=\"Error while removing staging\"::⚠️ Exit code $exit_code"
+                  else
+                    echo "✅ $content"
+                  fi
+                  ;;
+                "error")
+                    echo "::warning title="Error while removing staging"::⚠️ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+          
+          echo "✅ Staging cleanup process completed"
