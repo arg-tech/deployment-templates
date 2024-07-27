@@ -493,7 +493,7 @@ jobs:
             cd ~/repos/${{ github.event.repository.name }}
             docker compose down
 
-            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/amfws/amfws-staging/')
+            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/apartman-zvonimir.info/amfws-staging.arg.tech/')
             file_path="/etc/nginx/sites-available/$staging_domain"
             rm $file_path
             rm /etc/nginx/sites-enabled/$(basename "$file_path")
