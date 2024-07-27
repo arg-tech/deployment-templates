@@ -429,7 +429,7 @@ jobs:
             # Subdomain for repo: ${{ github.event.repository.name }}
             server {
               listen 443 ssl;
-              include snippets/self-signed.conf;
+              include snippets/astrid-cert-config;
               include snippets/ssl-params.conf;
               
               server_name $full_domain;
