@@ -116,7 +116,7 @@ jobs:
                 echo "Saved $key_no_prefix"
             }
 
-            echo "$SECRETS_CONTEXT" | jq -r "to_entries[] | select(.key | startswith(\"$stage_prefix\")) | \"\(.key | @base64) \(.value | @base64)\"" | while read -r key value; do
+            printf "%s" "$SECRETS_CONTEXT" | jq -r "to_entries[] | select(.key | startswith(\"$stage_prefix\")) | \"\(.key | @base64) \(.value | @base64)\"" | while read -r key value; do
                 save_to_file "$key" "$value"
             done
 
