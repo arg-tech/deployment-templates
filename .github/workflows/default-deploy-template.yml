@@ -148,7 +148,7 @@ jobs:
       - name: Convert production subdomain to staging subdomain
         id: convert-subdomain
         run: |
-          staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/amfws-staging.arg.tech/')
+          staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
           echo "staging_domain=$staging_domain" >> "$GITHUB_OUTPUT"
           echo "Staging domain is: $staging_domain"
 
@@ -549,7 +549,7 @@ jobs:
             cd ~/repos/${{ github.event.repository.name }}
             docker compose down
 
-            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/amfws-staging.arg.tech/')
+            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
             file_path="/etc/nginx/sites-available/$staging_domain"
             rm $file_path
             rm /etc/nginx/sites-enabled/$(basename "$file_path")
