@@ -102,7 +102,7 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({"STAGING_" + .key: .value}) | add' -c)          
+          staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("STAGING_" + .key): .value}) | add' -c)
           request_body=$(jq -n \
             --arg repo "${{ github.event.repository.name }}" \
             --arg secrets "$staging_secrets" \
