@@ -16,6 +16,8 @@ on:
         required: true
       sshgateway_ssh_key:
         required: true
+      deployment_agent_api_key:
+        required: true
 
 env:
   STAGING_SERVER_HOST: 178.79.188.16
@@ -26,6 +28,7 @@ env:
   PRODUCTION_WORKFLOW_NAME: Environments / Production
   SLACK_CHANNEL_ID: C072R6HPW21
   COMMAND_TIMEOUT: 30m
+  DEPLOYMENT_AGENT_URL: https://deployment-agent.argand.staging.arg.tech
 
 jobs:
   deploy-staging:
@@ -76,81 +79,107 @@ jobs:
           echo "INFO: No issues found";
 
       - name: Pull latest code
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.STAGING_SERVER_HOST }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ secrets.server_staging_ssh_key }}
-          script: |
-            cd ~/repos
-            if [ ! -d "${{ github.event.repository.name }}" ]; then
-              git clone git@github.com:arg-tech/${{ github.event.repository.name }}.git
-              echo "Repository cloned"
-            fi
-              
-            cd "${{ github.event.repository.name }}"
-            echo "Deleting the local branch in case an old branch with the same name exists"
-            git checkout main
-            git branch -D ${{ github.head_ref }}
-            
-            git fetch
-            git checkout ${{ github.head_ref }}
-            git reset --hard HEAD
-            git merge '@{u}'
-            
-            echo "Repository pulled and updated"
+        id: pull-code
+        run: |
+          response=$(curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "branch_name": "${{ github.head_ref }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/pull-code)
+          
+          status=$(echo "$response" | jq -r '.status')
+          if [ "$status" != "success" ]; then
+            echo "::error::Failed to pull code: $(echo "$response" | jq -r '.details')"
+            exit 1
+          fi
+          echo "Repository pulled and updated"
 
       - name: Create staging secrets
-        uses: appleboy/ssh-action@v1.0.3
+        id: create-secrets
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
-        with:
-          host: ${{ env.STAGING_SERVER_HOST }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ secrets.server_staging_ssh_key }}
-          envs: SECRETS_CONTEXT
-          script: |
-            cd ~/repos/${{ github.event.repository.name }}
-            mkdir -p ./.secrets
-
-            stage_prefix="STAGING_"
-
-            save_to_file() {
-                local key=$(echo "$1" | base64 --decode)
-                local value=$(echo "$2" | base64 --decode)
-                local key_no_prefix=$(echo "${key#*$stage_prefix}")
-                echo "$value" > ./.secrets/"$key_no_prefix".txt
-                echo "Saved $key_no_prefix"
-            }
-
-            printf "%s" "$SECRETS_CONTEXT" | jq -r "to_entries[] | select(.key | startswith(\"$stage_prefix\")) | \"\(.key | @base64) \(.value | @base64)\"" | while read -r key value; do
-                save_to_file "$key" "$value"
-            done
+        run: |
+          response=$(curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d "{
+              \"repository_name\": \"${{ github.event.repository.name }}\",
+              \"secrets_context\": $SECRETS_CONTEXT
+            }" \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets)
+          
+          status=$(echo "$response" | jq -r '.status')
+          if [ "$status" != "success" ]; then
+            echo "::error::Failed to create secrets: $(echo "$response" | jq -r '.details')"
+            exit 1
+          fi
+          
+          details=$(echo "$response" | jq -r '.details')
+          echo "$details"
 
       - name: Check if up-to-date with main
+        id: check-main-sync
         if: github.base_ref == 'main'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.STAGING_SERVER_HOST }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ secrets.server_staging_ssh_key }}
-          script: |
-              cd ~/repos/${{ github.event.repository.name }}
-              if ! git merge-base --is-ancestor origin/main ${{ github.event.pull_request.head.sha }};
-              then echo "This branch is not up to date with main. It must be brought up to date so that staging is representative of production."; exit 1; 
-              fi
-              echo "This branch is up to date with main and can be safely merged."
+        run: |
+          response=$(curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "branch_name": "${{ github.head_ref }}",
+              "commit_sha": "${{ github.event.pull_request.head.sha }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/check-main-sync)
+          
+          status=$(echo "$response" | jq -r '.status')
+          if [ "$status" != "success" ]; then
+            echo "::error::$(echo "$response" | jq -r '.details')"
+            exit 1
+          fi
+          
+          echo "$(echo "$response" | jq -r '.message')"
 
       - name: Build containers
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.STAGING_SERVER_HOST }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ secrets.server_staging_ssh_key }}
-          command_timeout: ${{env.COMMAND_TIMEOUT}}
-          script: |
-            cd ~/repos/${{ github.event.repository.name }}
-            docker compose up -d --build
+        id: build-containers
+        run: |
+          curl -N -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/build-container | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                # Extract the JSON content
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "build")
+                    echo "$content"
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::Build failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                  "error")
+                    echo "::error::$content"
+                    exit 1
+                    ;;
+                esac
+              fi
+            done
 
       - name: Convert production subdomain to staging subdomain
         id: convert-subdomain
