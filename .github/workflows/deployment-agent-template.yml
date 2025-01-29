@@ -102,15 +102,16 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          escaped_secrets=$(echo "$SECRETS_CONTEXT" | jq -c .)
+          staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({"STAGING_" + .key: .value}) | add' -c)          
+          request_body=$(jq -n \
+            --arg repo "${{ github.event.repository.name }}" \
+            --arg secrets "$staging_secrets" \
+            '{repository_name: $repo, secrets_context: $secrets}')
           
           response=$(curl -k -X POST \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
-            -d "{
-              \"repository_name\": \"${{ github.event.repository.name }}\",
-              \"secrets_context\": $escaped_secrets
-            }" \
+            -d "$request_body" \
             ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets)
           
           status=$(echo "$response" | jq -r '.status')
