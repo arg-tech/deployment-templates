@@ -81,7 +81,7 @@ jobs:
       - name: Pull latest code
         id: pull-code
         run: |
-          response=$(curl -X POST \
+          response=$(curl -k -X POST \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d '{
@@ -102,7 +102,7 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          response=$(curl -X POST \
+          response=$(curl -k -X POST \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d "{
@@ -124,7 +124,7 @@ jobs:
         id: check-main-sync
         if: github.base_ref == 'main'
         run: |
-          response=$(curl -X POST \
+          response=$(curl -k -X POST \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d '{
@@ -145,7 +145,7 @@ jobs:
       - name: Build containers
         id: build-containers
         run: |
-          curl -N -X POST \
+          curl -k -N -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
