@@ -195,9 +195,9 @@ jobs:
             file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$full_domain"
             echo "$nginx_config" > "$file_path"
 
-            sudo nginx -t
+            docker exec nginx-reverse-proxy nginx -t
             if [ $? -eq 0 ]; then
-              sudo nginx -s reload
+              docker exec nginx-reverse-proxy nginx -s reload
               echo "Success: nginx configuration reloaded"
             else
               echo "Error: nginx configuration test failed. Please contact IWG."
