@@ -181,21 +181,19 @@ jobs:
             # Subdomain for repo: ${{ github.event.repository.name }}
             server {
               listen 443 ssl;
-              include snippets/self-signed.conf;
-              include snippets/ssl-params.conf;
+              include /etc/nginx/ssl/ssl.conf;
 
               server_name $full_domain;
         
               location / {
                   proxy_set_header   X-Forwarded-For \$remote_addr;
                   proxy_set_header   Host \$http_host;
-                  proxy_pass         \"http://127.0.0.1:${{ inputs.app_port }}\";
+                  proxy_pass         \"http://host.docker.internal:${{ inputs.app_port }}\";
               }
             }"
 
-            file_path="/etc/nginx/sites-available/$full_domain"
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/$full_domain"
             echo "$nginx_config" > "$file_path"
-            ln -sf "$file_path" "/etc/nginx/sites-enabled/"
 
             sudo nginx -t
             if [ $? -eq 0 ]; then
