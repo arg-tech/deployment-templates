@@ -192,7 +192,7 @@ jobs:
               }
             }"
 
-            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/$full_domain"
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$full_domain"
             echo "$nginx_config" > "$file_path"
 
             sudo nginx -t
