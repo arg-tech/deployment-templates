@@ -433,25 +433,23 @@ jobs:
             # Subdomain for repo: ${{ github.event.repository.name }}
             server {
               listen 443 ssl;
-              include snippets/self-signed.conf;
-              include snippets/ssl-params.conf;
-              
+              include /etc/nginx/ssl/ssl.conf;
+
               server_name $full_domain;
         
               location / {
                   proxy_set_header   X-Forwarded-For \$remote_addr;
                   proxy_set_header   Host \$http_host;
-                  proxy_pass         \"http://127.0.0.1:${{ inputs.app_port }}\";
+                  proxy_pass         \"http://host.docker.internal:${{ inputs.app_port }}\";
               }
             }"
 
-            file_path="/etc/nginx/sites-available/$full_domain"
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$full_domain"
             echo "$nginx_config" > "$file_path"
-            ln -sf "$file_path" "/etc/nginx/sites-enabled/"
 
-            sudo nginx -t
+            docker exec nginx-reverse-proxy nginx -t
             if [ $? -eq 0 ]; then
-              sudo nginx -s reload
+              docker exec nginx-reverse-proxy nginx -s reload
               echo "Success: nginx configuration reloaded"
             else
               echo "Error: nginx configuration test failed. Please contact IWG immediately."
@@ -487,9 +485,8 @@ jobs:
             server {
               listen 443 ssl;
               server_name $full_domain;
-                    
-              include snippets/self-signed.conf;
-              include snippets/ssl-params.conf;
+
+              include /etc/nginx/ssl/ssl.conf;
               
               location / {
                     proxy_pass https://134.36.36.77:443;
@@ -502,13 +499,12 @@ jobs:
                 }
             }"
 
-            file_path="/etc/nginx/sites-available/$full_domain"
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/forwards-to-other-servers/$full_domain"
             echo "$nginx_config" > "$file_path"
-            ln -sf "$file_path" "/etc/nginx/sites-enabled/"
 
-            sudo nginx -t
+            docker exec nginx-reverse-proxy nginx -t
             if [ $? -eq 0 ]; then
-              sudo nginx -s reload
+              docker exec nginx-reverse-proxy nginx -s reload
               echo "Success: nginx configuration reloaded"
             else
               echo "Error: nginx configuration test failed. Please contact IWG immediately."
@@ -555,13 +551,12 @@ jobs:
             docker compose down
 
             staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
-            file_path="/etc/nginx/sites-available/$staging_domain"
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$staging_domain"
             rm $file_path
-            rm /etc/nginx/sites-enabled/$(basename "$file_path")
 
-            sudo nginx -t
+            docker exec nginx-reverse-proxy nginx -t
             if [ $? -eq 0 ]; then
-              sudo nginx -s reload
+              docker exec nginx-reverse-proxy nginx -s reload
               echo "Success: nginx configuration reloaded"
             else
               echo "Error: nginx configuration test on STAGING failed. Please contact IWG."
