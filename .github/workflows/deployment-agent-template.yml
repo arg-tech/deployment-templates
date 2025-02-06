@@ -570,25 +570,13 @@ jobs:
       - name: Remove artifacts from staging server
         # Logs utility should stay on the staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.STAGING_SERVER_HOST }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ secrets.server_staging_ssh_key }}
-          script: |
-            cd ~/repos/${{ github.event.repository.name }}
-            docker compose down
-
-            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
-            file_path="/etc/nginx/sites-available/$staging_domain"
-            rm $file_path
-            rm /etc/nginx/sites-enabled/$(basename "$file_path")
-
-            sudo nginx -t
-            if [ $? -eq 0 ]; then
-              sudo nginx -s reload
-              echo "Success: nginx configuration reloaded"
-            else
-              echo "Error: nginx configuration test on STAGING failed. Please contact IWG."
-              exit 1
-            fi
+        run: |
+          curl -k -N -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/delete-deployed-service
