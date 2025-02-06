@@ -81,21 +81,41 @@ jobs:
       - name: Pull latest code
         id: pull-code
         run: |
-          response=$(curl -k -X POST \
+          curl -k -N -X POST \
             -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "${{ github.head_ref }}"
             }' \
-            ${{ env.DEPLOYMENT_AGENT_URL }}/pull-code)
-          
-          status=$(echo "$response" | jq -r '.status')
-          if [ "$status" != "success" ]; then
-            echo "::error::Failed to pull code: $(echo "$response" | jq -r '.details')"
-            exit 1
-          fi
-          echo "Repository pulled and updated"
+            ${{ env.DEPLOYMENT_AGENT_URL }}/pull-code | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                # Extract the JSON content
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "info"|"progress"|"success"|"warning")
+                    echo "$content"
+                    ;;
+                  "error")
+                    echo "::error::$content"
+                    exit 1
+                    ;;
+                  "status")
+                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
+                      echo "::error::Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
 
       - name: Create staging secrets
         id: create-secrets
@@ -198,45 +218,16 @@ jobs:
           username: ${{ env.DEPLOY_SSH_USER }}
           key: ${{ secrets.server_staging_ssh_key }}
           script: |
-            full_domain=${{ steps.convert-subdomain.outputs.staging_domain }}
-
-            if [ -f "/etc/nginx/sites-available/$full_domain" ]; then
-              existing_config_repo=$(grep -oP '(?<=Subdomain for repo: ).*' /etc/nginx/sites-available/$full_domain)
-              if [ "$existing_config_repo" != "${{ github.event.repository.name }}" ]; then
-                echo "A different repository ($existing_config_repo) uses this domain. Choose another domain or contact IWG."
-                exit 1
-              fi
-            fi
-
-            nginx_config="
-            # Below comment is used by the CI/CD pipeline, do not edit or remove
-            # Subdomain for repo: ${{ github.event.repository.name }}
-            server {
-              listen 443 ssl;
-              include snippets/self-signed.conf;
-              include snippets/ssl-params.conf;
-
-              server_name $full_domain;
-        
-              location / {
-                  proxy_set_header   X-Forwarded-For \$remote_addr;
-                  proxy_set_header   Host \$http_host;
-                  proxy_pass         \"http://127.0.0.1:${{ inputs.app_port }}\";
-              }
-            }"
-
-            file_path="/etc/nginx/sites-available/$full_domain"
-            echo "$nginx_config" > "$file_path"
-            ln -sf "$file_path" "/etc/nginx/sites-enabled/"
-
-            sudo nginx -t
-            if [ $? -eq 0 ]; then
-              sudo nginx -s reload
-              echo "Success: nginx configuration reloaded"
-            else
-              echo "Error: nginx configuration test failed. Please contact IWG."
-              exit 1
-            fi
+            curl -k -N -X POST \
+              -H "Content-Type: application/json" \
+              -H "Accept: text/event-stream" \
+              -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+              -d '{
+                "repository_name": "${{ github.event.repository.name }}",
+                "full_domain": "${{ steps.convert-subdomain.outputs.staging_domain }}",
+                "port": "${{ inputs.app_port }}"
+              }' \
+              ${{ env.DEPLOYMENT_AGENT_URL }}/provision-subdomain
 
       - name: Get build details URL
         uses: actions/github-script@v7
