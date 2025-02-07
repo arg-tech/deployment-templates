@@ -507,60 +507,18 @@ jobs:
 
       # Todo: make generic
       - name: Forward new subdomain to Godel
-        uses: appleboy/ssh-action@v1.0.3
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
-        with:
-          host: argand
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{secrets.argand_ssh_key}}
-          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
-          proxy_username: ${{ env.DEPLOY_SSH_USER }}
-          proxy_key: ${{ secrets.sshgateway_ssh_key }}
-          script: |
-            full_domain=${{ inputs.full_app_url }}
-
-            if [ -f "/etc/nginx/sites-available/$full_domain" ]; then
-              existing_config_repo=$(grep -oP '(?<=Subdomain for repo: ).*' /etc/nginx/sites-available/$full_domain)
-              if [ "$existing_config_repo" != "${{ github.event.repository.name }}" ]; then
-                echo "A different repository ($existing_config_repo) uses this domain. Choose another domain or contact IWG."
-                exit 1
-              fi
-            fi
-
-            nginx_config="
-            # Below comments are used by the CI/CD pipeline, do not edit or remove
-            # Subdomain for repo: ${{ github.event.repository.name }}
-            # Domain forwarded to: Godel
-            server {
-              listen 443 ssl;
-              server_name $full_domain;
-                    
-              include snippets/self-signed.conf;
-              include snippets/ssl-params.conf;
-              
-              location / {
-                    proxy_pass https://134.36.36.77:443;
-                    proxy_set_header Host \$host;
-                    proxy_set_header X-Real-IP \$remote_addr;
-                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto \$scheme;
-                    proxy_ssl_verify off;
-                    proxy_ssl_protocols TLSv1.3;
-                }
-            }"
-
-            file_path="/etc/nginx/sites-available/$full_domain"
-            echo "$nginx_config" > "$file_path"
-            ln -sf "$file_path" "/etc/nginx/sites-enabled/"
-
-            sudo nginx -t
-            if [ $? -eq 0 ]; then
-              sudo nginx -s reload
-              echo "Success: nginx configuration reloaded"
-            else
-              echo "Error: nginx configuration test failed. Please contact IWG immediately."
-              exit 1
-            fi
+        run: |
+          curl -k -N -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "${{ inputs.full_app_url }}",
+              "target_server": "godel"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/forward-subdomain
 
       - name: Comment on PR (finished build)
         uses: actions/github-script@v7
