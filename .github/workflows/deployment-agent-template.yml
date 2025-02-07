@@ -84,7 +84,7 @@ jobs:
           # Update this when making breaking changes to the deployment agent
           REQUIRED_VERSION="1.0"
           
-          response=$(curl -k -s ${{ env.DEPLOYMENT_AGENT_URL }}/health)
+          response=$(curl -k -s "${{ env.DEPLOYMENT_AGENT_URL }}/health")
           echo "Health check response: $response"
           
           if ! echo "$response" | jq -e . > /dev/null 2>&1; then
