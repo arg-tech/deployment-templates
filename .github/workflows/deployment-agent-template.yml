@@ -379,7 +379,6 @@ jobs:
         id: get-job-url
         with:
           script: |
-            echo "🔗 Getting build details URL"
             const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -420,7 +419,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "💬 Commenting on PR"
             const message = `${{steps.compose-ending-message.outputs.result}}`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -463,7 +461,6 @@ jobs:
         id: get-pr-number
         with:
           script: |
-            echo "🔢 Getting PR number"
             return (await
               github.rest.repos.listPullRequestsAssociatedWithCommit({
                 commit_sha: context.sha,
@@ -478,7 +475,6 @@ jobs:
         id: get-job-url
         with:
           script: |
-            echo "🔗 Getting build details URL"
             const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -494,7 +490,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "💬 Commenting on PR (started build)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
@@ -767,7 +762,6 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "✅ Commenting on PR (finished build)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
