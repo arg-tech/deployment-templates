@@ -41,7 +41,7 @@ jobs:
       - name: Check subdomain and port uniqueness
         id: domain-and-port-checks
         run: >-
-          🌐 Verifying availability of ${{ inputs.full_app_url }} (port ${{ inputs.app_port }}) on ${{ inputs.target_production_server_nickname }}
+          🌐 Verifying availability of ${{ inputs.full_app_url }} \(port ${{ inputs.app_port }}\) on ${{ inputs.target_production_server_nickname }}
 
           if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
               resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
@@ -85,7 +85,7 @@ jobs:
       - name: Check deployment agent version
         id: check-version
         run: >-
-          🔍 Checking deployment agent compatibility for ${{ inputs.full_app_url }} (targeting ${{ inputs.target_production_server_nickname }})
+          🔍 Checking deployment agent compatibility for ${{ inputs.full_app_url }} \(targeting ${{ inputs.target_production_server_nickname }}\)
 
           REQUIRED_VERSION="1.0"
           
@@ -122,7 +122,7 @@ jobs:
       - name: Pull latest code
         id: pull-code
         run: >-
-          📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})
+          📥 Pulling latest code for ${{ github.event.repository.name }} \(branch: ${{ github.head_ref }}\)
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -455,7 +455,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "💬 Commenting on PR (started build)"
+            echo "💬 Commenting on PR \(started build\)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
@@ -595,7 +595,7 @@ jobs:
       - name: Provision new subdomain
         id: provision-subdomain-prod
         run: >-
-          🚀 Provisioning new subdomain for production
+          🚀 Provisioning new subdomain for production \(${{ github.event.repository.name }}\)
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -661,7 +661,7 @@ jobs:
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
         run: >-
-          ➡️ Forwarding ${{ inputs.full_app_url }} to Godel
+          ➡️ Forwarding ${{ inputs.full_app_url }} to Godel \(via deployment agent\)
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -678,7 +678,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "✅ Commenting on PR (finished build)"
+            echo "✅ Commenting on PR \(finished build\)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
