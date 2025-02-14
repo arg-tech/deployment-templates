@@ -147,12 +147,13 @@ jobs:
                     echo "ℹ️ $content"
                     ;;
                   "error")
-                    echo "::error::❌$content"
+                    echo "::error::❌ $content"
                     exit 1
                     ;;
                   "status")
-                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
                       exit 1
                     fi
                     ;;
