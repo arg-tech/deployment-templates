@@ -143,7 +143,7 @@ jobs:
                 content=$(echo "$json_content" | jq -r '.content')
                 
                 case $type in
-                  "info"|"progress"|"success"|"warning")
+                  "stdout")
                     echo "ℹ️ $content"
                     ;;
                   "error")
@@ -176,20 +176,40 @@ jobs:
             --arg secrets "$staging_secrets" \
             '{repository_name: $repo, secrets_context: $secrets}')
           
-          response=$(curl -k -X POST \
+          curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d "$request_body" \
-            ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets)
-          
-          status=$(echo "$response" | jq -r '.status')
-          if [ "$status" != "success" ]; then
-            echo "::error::❌ Failed to create secrets: $(echo "$response" | jq -r '.details')"
-            exit 1
-          fi
-          
-          details=$(echo "$response" | jq -r '.details')
-          echo "✅ $details"
+            ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "stdout")
+                    echo "ℹ️ $content"
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
+
+          echo "✅ Secrets created successfully"
 
       - name: Check if up-to-date with main
         id: check-main-sync
@@ -197,23 +217,44 @@ jobs:
         run: |
           echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
 
-          response=$(curl -k --no-progress-meter -X POST \
+          curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "${{ github.head_ref }}",
               "commit_sha": "${{ github.event.pull_request.head.sha }}"
             }' \
-            ${{ env.DEPLOYMENT_AGENT_URL }}/check-main-sync)
-          
-          status=$(echo "$response" | jq -r '.status')
-          if [ "$status" != "success" ]; then
-            echo "::error::❌ $(echo "$response" | jq -r '.details')"
-            exit 1
-          fi
-          
-          echo "✅ $(echo "$response" | jq -r '.message')"
+            ${{ env.DEPLOYMENT_AGENT_URL }}/check-main-sync | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "stdout")
+                    echo "ℹ️ $content"
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
+
+          echo "✅ Branch is up to date with main"
 
       - name: Build containers
         id: build-containers
@@ -241,7 +282,7 @@ jobs:
                     echo "🔨 $content"
                     ;;
                   "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code')
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
                     if [ "$exit_code" != "0" ]; then
                       echo "::error::❌ Build failed with exit code $exit_code"
                       exit 1
@@ -288,7 +329,7 @@ jobs:
                 content=$(echo "$json_content" | jq -r '.content')
                 
                 case $type in
-                  "info"|"progress")
+                  "stdout")
                     if [[ $content == *"nginx configuration"* ]]; then
                       echo "⚙️ $content"
                     elif [[ $content == *"test"* ]]; then
@@ -321,7 +362,8 @@ jobs:
                     exit 1
                     ;;
                   "status")
-                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
                       echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
                       exit 1
                     fi
@@ -477,7 +519,7 @@ jobs:
       - name: Pull latest code
         id: pull-code-prod
         run: |
-          📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}
+          echo "📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}"
 
           curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
@@ -498,22 +540,17 @@ jobs:
                 content=$(echo "$json_content" | jq -r '.content')
                 
                 case $type in
-                  "info"|"progress")
+                  "stdout")
                     echo "ℹ️ $content"
-                    ;;
-                  "success")
-                    echo "✅ $content"
-                    ;;
-                  "warning")
-                    echo "⚠️ $content"
                     ;;
                   "error")
                     echo "::error::❌ $content"
                     exit 1
                     ;;
                   "status")
-                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
                       exit 1
                     fi
                     ;;
@@ -521,12 +558,14 @@ jobs:
               fi
             done
 
+          echo "✅ Repository successfully pulled"
+
       - name: Create production secrets
         id: create-secrets-prod
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          🔐 Setting up production secrets for ${{ github.event.repository.name }}
+          echo "🔐 Setting up production secrets for ${{ github.event.repository.name }}"
 
           production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("PRODUCTION_" + .key): .value}) | add' -c)
           request_body=$(jq -n \
@@ -534,25 +573,45 @@ jobs:
             --arg secrets "$production_secrets" \
             '{repository_name: $repo, secrets_context: $secrets}')
           
-          response=$(curl -k --no-progress-meter -X POST \
+          curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
             -d "$request_body" \
-            ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets)
-          
-          status=$(echo "$response" | jq -r '.status')
-          if [ "$status" != "success" ]; then
-            echo "::error::❌ Failed to create secrets: $(echo "$response" | jq -r '.details')"
-            exit 1
-          fi
-          
-          details=$(echo "$response" | jq -r '.details')
-          echo "✅ $details"
+            ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "stdout")
+                    echo "ℹ️ $content"
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
+
+          echo "✅ Production secrets created successfully"
 
       - name: Build containers
         id: build-containers-prod
         run: |
-          🏗️ Building production containers for ${{ github.event.repository.name }}
+          echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
 
           curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
@@ -575,7 +634,7 @@ jobs:
                     echo "🔨 $content"
                     ;;
                   "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code')
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
                     if [ "$exit_code" != "0" ]; then
                       echo "::error::❌ Build failed with exit code $exit_code"
                       exit 1
@@ -592,7 +651,7 @@ jobs:
       - name: Provision new subdomain
         id: provision-subdomain-prod
         run: |
-          🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})
+          echo "🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})"
 
           curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
@@ -613,7 +672,7 @@ jobs:
                 content=$(echo "$json_content" | jq -r '.content')
                 
                 case $type in
-                  "info"|"progress")
+                  "stdout")
                     if [[ $content == *"nginx configuration"* ]]; then
                       echo "⚙️ $content"
                     elif [[ $content == *"test"* ]]; then
@@ -646,8 +705,9 @@ jobs:
                     exit 1
                     ;;
                   "status")
-                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
                       exit 1
                     fi
                     ;;
@@ -658,7 +718,7 @@ jobs:
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
         run: |
-          ➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)
+          echo "➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)"
 
           curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
@@ -669,7 +729,39 @@ jobs:
               "full_domain": "${{ inputs.full_app_url }}",
               "target_server": "godel"
             }' \
-            ${{ env.DEPLOYMENT_AGENT_URL }}/forward-subdomain
+            ${{ env.DEPLOYMENT_AGENT_URL }}/forward-subdomain | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "stdout")
+                    echo "ℹ️ $content"
+                    ;;
+                  "success")
+                    echo "✅ $content"
+                    ;;
+                  "warning")
+                    echo "⚠️ $content"
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
 
       - name: Comment on PR (finished build)
         uses: actions/github-script@v7
@@ -702,7 +794,7 @@ jobs:
       - name: Remove artifacts from staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
         run: |
-          🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}
+          echo "🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}"
 
           curl -k -N --no-progress-meter -X POST \
             -H "Content-Type: application/json" \
@@ -712,4 +804,36 @@ jobs:
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')"
             }' \
-            ${{ env.DEPLOYMENT_AGENT_URL }}/delete-deployed-service
+            ${{ env.DEPLOYMENT_AGENT_URL }}/delete-deployed-service | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "stdout")
+                    echo "ℹ️ $content"
+                    ;;
+                  "success")
+                    echo "✅ $content"
+                    ;;
+                  "warning")
+                    echo "⚠️ $content"
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
