@@ -157,14 +157,23 @@ jobs:
                     exit 1
                     ;;
                   "status")
-                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code')
+                    if [ "$exit_code" = "null" ]; then
+                      continue
+                    fi
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $exit_code"
                       exit 1
                     fi
                     ;;
                 esac
               fi
             done
+
+          if [ ! -d ~/repos/"${{ github.event.repository.name }}" ]; then
+            echo "::error::❌ Repository directory not found after pull"
+            exit 1
+          fi
 
       - name: Create staging secrets
         id: create-secrets
