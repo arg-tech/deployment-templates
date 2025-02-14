@@ -41,12 +41,14 @@ jobs:
       - name: Check subdomain and port uniqueness
         id: domain-and-port-checks
         run: |
+          echo "🌐 Verifying availability of ${{ inputs.full_app_url }} (port ${{ inputs.app_port }}) on ${{ inputs.target_production_server_nickname }}"
+          
           if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
               resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
           elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
               resource_lister_url="http://resource-lister.godel.arg.tech/get-sites"
           else
-              echo "::error::Invalid server nickname";
+              echo "::error::❌ Invalid server nickname: ${{ inputs.target_production_server_nickname }}"
               exit 1;
           fi
 
@@ -58,41 +60,41 @@ jobs:
 
           if [[ -n "$services_with_matching_repo_name" ]]
           then
-              echo "INFO: Found an existing deployment for this repository";
+              echo "ℹ️ Found an existing deployment for ${{ github.event.repository.name }}"
               
               if [[ -n "$services_with_matching_port" && "$services_with_matching_repo_name" != "$services_with_matching_port" ]]; then
-                  echo "::error::Port has been changed to one occupied by a different service";
+                  echo "::error::❌ Port ${{ inputs.app_port }} is already in use by another service"
                   exit 1;
               fi
 
               if [[ "$services_with_matching_repo_name" != "$services_with_matching_domain" ]]; then
-                  echo "::error::Attempted to change the subdomain";
+                  echo "::error::❌ Cannot change subdomain for existing deployment"
                   exit 1;
               fi
           else
-              echo "INFO: Did not find an existing deployment for this repository";
+              echo "ℹ️ No existing deployment found for ${{ github.event.repository.name }}"
 
               if [[ -n "$services_with_matching_domain" || -n "$services_with_matching_port" ]]; then
-                  echo "::error::Port or subdomain occupied by an existing service";
+                  echo "::error::❌ The requested domain or port is already in use by another service"
                   exit 1;
               fi
           fi
 
-          echo "INFO: No issues found";
+          echo "✅ Domain and port checks passed"
 
       - name: Check deployment agent version
         id: check-version
         run: |
+          echo "🔍 Checking deployment agent compatibility for ${{ inputs.full_app_url }} (targeting ${{ inputs.target_production_server_nickname }})"
           # Update this when making breaking changes to the deployment agent
           REQUIRED_VERSION="1.0"
           
           response=$(curl -k -s \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
             "${{ env.DEPLOYMENT_AGENT_URL }}/health")
-          echo "Health check response: $response"
           
           if ! echo "$response" | jq -e . > /dev/null 2>&1; then
-            echo "::error::Invalid JSON response from health check"
+            echo "::error::❌ Invalid JSON response from health check"
             exit 1
           fi
           
@@ -100,26 +102,28 @@ jobs:
           agent_status=$(echo "$response" | jq -r '.status // empty')
           
           if [ -z "$agent_version" ] || [ -z "$agent_status" ]; then
-            echo "::error::Missing version or status in response"
+            echo "::error::❌ Missing version or status in response"
             exit 1
           fi
           
           if [ "$agent_status" != "healthy" ]; then
-            echo "::error::Deployment agent is not healthy"
+            echo "::error::❌ Deployment agent is not healthy"
             exit 1
           fi
           
           if [ "$agent_version" != "$REQUIRED_VERSION" ]; then
-            echo "::error::Deployment agent version mismatch. Required: $REQUIRED_VERSION, Found: $agent_version"
+            echo "::error::❌ Version mismatch - Required: $REQUIRED_VERSION, Found: $agent_version"
             exit 1
           fi
           
-          echo "INFO: Deployment agent version check passed"
+          echo "ℹ️ Deployment agent version: $agent_version"
+          echo "✅ Deployment agent version check passed"
 
       - name: Pull latest code
         id: pull-code
         run: |
-          curl -k -N -X POST \
+          echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
+          curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
@@ -132,23 +136,28 @@ jobs:
               [ -z "$line" ] && continue
               
               if [[ $line == data:* ]]; then
-                # Extract the JSON content
                 json_content="${line#data: }"
                 
                 type=$(echo "$json_content" | jq -r '.type')
                 content=$(echo "$json_content" | jq -r '.content')
                 
                 case $type in
-                  "info"|"progress"|"success"|"warning")
-                    echo "$content"
+                  "info"|"progress")
+                    echo "ℹ️ $content"
+                    ;;
+                  "success")
+                    echo "✅ $content"
+                    ;;
+                  "warning")
+                    echo "⚠️ $content"
                     ;;
                   "error")
-                    echo "::error::$content"
+                    echo "::error::❌ $content"
                     exit 1
                     ;;
                   "status")
                     if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
-                      echo "::error::Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
                       exit 1
                     fi
                     ;;
@@ -161,6 +170,7 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
+          echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
           staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("STAGING_" + .key): .value}) | add' -c)
           request_body=$(jq -n \
             --arg repo "${{ github.event.repository.name }}" \
@@ -175,17 +185,18 @@ jobs:
           
           status=$(echo "$response" | jq -r '.status')
           if [ "$status" != "success" ]; then
-            echo "::error::Failed to create secrets: $(echo "$response" | jq -r '.details')"
+            echo "::error::❌ Failed to create secrets: $(echo "$response" | jq -r '.details')"
             exit 1
           fi
           
           details=$(echo "$response" | jq -r '.details')
-          echo "$details"
+          echo "✅ $details"
 
       - name: Check if up-to-date with main
         id: check-main-sync
         if: github.base_ref == 'main'
         run: |
+          echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
           response=$(curl -k -X POST \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
@@ -198,16 +209,17 @@ jobs:
           
           status=$(echo "$response" | jq -r '.status')
           if [ "$status" != "success" ]; then
-            echo "::error::$(echo "$response" | jq -r '.details')"
+            echo "::error::❌ $(echo "$response" | jq -r '.details')"
             exit 1
           fi
           
-          echo "$(echo "$response" | jq -r '.message')"
+          echo "✅ $(echo "$response" | jq -r '.message')"
 
       - name: Build containers
         id: build-containers
         run: |
-          curl -k -N -X POST \
+          echo "🏗️ Building containers for ${{ github.event.repository.name }}"
+          curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
@@ -218,7 +230,6 @@ jobs:
               [ -z "$line" ] && continue
               
               if [[ $line == data:* ]]; then
-                # Extract the JSON content
                 json_content="${line#data: }"
                 
                 type=$(echo "$json_content" | jq -r '.type')
@@ -226,17 +237,17 @@ jobs:
                 
                 case $type in
                   "build")
-                    echo "$content"
+                    echo "🔨 $content"
                     ;;
                   "status")
                     exit_code=$(echo "$json_content" | jq -r '.exit_code')
                     if [ "$exit_code" != "0" ]; then
-                      echo "::error::Build failed with exit code $exit_code"
+                      echo "::error::❌ Build failed with exit code $exit_code"
                       exit 1
                     fi
                     ;;
                   "error")
-                    echo "::error::$content"
+                    echo "::error::❌ $content"
                     exit 1
                     ;;
                 esac
@@ -246,27 +257,75 @@ jobs:
       - name: Convert production subdomain to staging subdomain
         id: convert-subdomain
         run: |
+          echo "🔄 Converting production subdomain to staging subdomain"
           staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
           echo "staging_domain=$staging_domain" >> "$GITHUB_OUTPUT"
           echo "Staging domain is: $staging_domain"
 
       - name: Provision new subdomain
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.STAGING_SERVER_HOST }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ secrets.server_staging_ssh_key }}
-          script: |
-            curl -k -N -X POST \
-              -H "Content-Type: application/json" \
-              -H "Accept: text/event-stream" \
-              -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
-              -d '{
-                "repository_name": "${{ github.event.repository.name }}",
-                "full_domain": "${{ steps.convert-subdomain.outputs.staging_domain }}",
-                "port": "${{ inputs.app_port }}"
-              }' \
-              ${{ env.DEPLOYMENT_AGENT_URL }}/provision-subdomain
+        id: provision-subdomain
+        run: |
+          echo "🚀 Provisioning new subdomain"
+          curl -k -N -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "${{ steps.convert-subdomain.outputs.staging_domain }}",
+              "port": "${{ inputs.app_port }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/provision-subdomain | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "info"|"progress")
+                    if [[ $content == *"nginx configuration"* ]]; then
+                      echo "⚙️ $content"
+                    elif [[ $content == *"test"* ]]; then
+                      echo "🔍 $content"
+                    elif [[ $content == *"reload"* ]]; then
+                      echo "🔄 $content"
+                    else
+                      echo "ℹ️ $content"
+                    fi
+                    ;;
+                  "success")
+                    if [[ $content == *"nginx configuration reloaded"* ]]; then
+                      echo "✅ Nginx configuration updated and reloaded successfully"
+                      echo "🌐 Subdomain is now available at: http://${{ steps.convert-subdomain.outputs.staging_domain }}"
+                    else
+                      echo "✅ $content"
+                    fi
+                    ;;
+                  "warning")
+                    echo "⚠️ $content"
+                    ;;
+                  "error")
+                    if [[ $content == *"nginx configuration test failed"* ]]; then
+                      echo "::error::❌ Nginx configuration test failed - please contact IWG"
+                    elif [[ $content == *"different repository"* ]]; then
+                      echo "::error::❌ Domain conflict: $content"
+                    else
+                      echo "::error::❌ $content"
+                    fi
+                    exit 1
+                    ;;
+                  "status")
+                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
 
       - name: Get build details URL
         uses: actions/github-script@v7
@@ -275,6 +334,7 @@ jobs:
         id: get-job-url
         with:
           script: |
+            echo "🔗 Getting build details URL"
             const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -315,6 +375,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            echo "💬 Commenting on PR"
             const message = `${{steps.compose-ending-message.outputs.result}}`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -342,6 +403,7 @@ jobs:
       - name: Get production hostname
         id: convert-nickname
         run: |
+          echo "�� Getting production hostname"
           case "${{ inputs.target_production_server_nickname }}" in
             "argand") production_host="argand"; ;;
             "godel") production_host="godel"; ;;
@@ -355,6 +417,7 @@ jobs:
         id: get-pr-number
         with:
           script: |
+            echo "🔢 Getting PR number"
             return (await
               github.rest.repos.listPullRequestsAssociatedWithCommit({
                 commit_sha: context.sha,
@@ -369,6 +432,7 @@ jobs:
         id: get-job-url
         with:
           script: |
+            echo "🔗 Getting build details URL"
             const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -384,6 +448,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            echo "💬 Commenting on PR (started build)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
@@ -406,127 +471,187 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
 
       - name: Pull latest code
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ steps.convert-nickname.outputs.production_host }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
-          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
-          proxy_username: ${{ env.DEPLOY_SSH_USER }}
-          proxy_key: ${{ secrets.sshgateway_ssh_key }}
-          script: |
-            cd ~/repos
-            if [ ! -d "${{ github.event.repository.name }}" ]; then
-              git clone git@github.com:arg-tech/${{ github.event.repository.name }}.git
-              echo "Repository cloned"
-            fi
+        id: pull-code-prod
+        run: |
+          echo "📥 Pulling latest code for production"
+          curl -k -N -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "branch_name": "${{ github.head_ref }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/pull-code | while IFS= read -r line; do
+              [ -z "$line" ] && continue
               
-            cd "${{ github.event.repository.name }}"
-            git fetch
-            git checkout ${{ github.head_ref }}
-            git reset --hard HEAD
-            git merge '@{u}'
-            echo "Repository pulled and updated"  
-
-      - name: Create production secrets
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          SECRETS_CONTEXT: ${{ toJson(secrets) }}
-        with:
-          host: ${{ steps.convert-nickname.outputs.production_host }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
-          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
-          proxy_username: ${{ env.DEPLOY_SSH_USER }}
-          proxy_key: ${{ secrets.sshgateway_ssh_key }}
-          envs: SECRETS_CONTEXT
-          script: |
-            cd ~/repos/${{ github.event.repository.name }}
-            mkdir -p ./.secrets
-
-            stage_prefix="PRODUCTION_"
-
-            save_to_file() {
-                local key=$(echo "$1" | base64 --decode)
-                local value=$(echo "$2" | base64 --decode)
-                local key_no_prefix=$(echo "${key#*$stage_prefix}")
-                echo "$value" > ./.secrets/"$key_no_prefix".txt
-                echo "Saved $key_no_prefix"
-            }
-            
-            printf "%s" "$SECRETS_CONTEXT" | jq -r 'to_entries[] | select(.key | startswith("'"$stage_prefix"'")) | "\(.key | @base64) \(.value | @base64)"' | while read -r key value; do
-                save_to_file "$key" "$value"
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "info"|"progress")
+                    echo "ℹ️ $content"
+                    ;;
+                  "success")
+                    echo "✅ $content"
+                    ;;
+                  "warning")
+                    echo "⚠️ $content"
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                  "status")
+                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
             done
 
+      - name: Create production secrets
+        id: create-secrets-prod
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        run: |
+          echo "🔐 Setting up production secrets"
+          production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("PRODUCTION_" + .key): .value}) | add' -c)
+          request_body=$(jq -n \
+            --arg repo "${{ github.event.repository.name }}" \
+            --arg secrets "$production_secrets" \
+            '{repository_name: $repo, secrets_context: $secrets}')
+          
+          response=$(curl -k -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d "$request_body" \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/create-secrets)
+          
+          status=$(echo "$response" | jq -r '.status')
+          if [ "$status" != "success" ]; then
+            echo "::error::❌ Failed to create secrets: $(echo "$response" | jq -r '.details')"
+            exit 1
+          fi
+          
+          details=$(echo "$response" | jq -r '.details')
+          echo "✅ $details"
+
       - name: Build containers
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ steps.convert-nickname.outputs.production_host }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
-          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
-          proxy_username: ${{ env.DEPLOY_SSH_USER }}
-          proxy_key: ${{ secrets.sshgateway_ssh_key }}
-          command_timeout: ${{env.COMMAND_TIMEOUT}}
-          script: |
-            cd ~/repos/${{ github.event.repository.name }}
-            docker compose up -d --build
+        id: build-containers-prod
+        run: |
+          echo "🏗️ Building containers for production"
+          curl -k -N -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/build-container | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "build")
+                    echo "🔨 $content"
+                    ;;
+                  "status")
+                    exit_code=$(echo "$json_content" | jq -r '.exit_code')
+                    if [ "$exit_code" != "0" ]; then
+                      echo "::error::❌ Build failed with exit code $exit_code"
+                      exit 1
+                    fi
+                    ;;
+                  "error")
+                    echo "::error::❌ $content"
+                    exit 1
+                    ;;
+                esac
+              fi
+            done
 
       - name: Provision new subdomain
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ steps.convert-nickname.outputs.production_host }}
-          username: ${{ env.DEPLOY_SSH_USER }}
-          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
-          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
-          proxy_username: ${{ env.DEPLOY_SSH_USER }}
-          proxy_key: ${{ secrets.sshgateway_ssh_key }}
-          script: |
-            full_domain=${{ inputs.full_app_url }}
-
-            if [ -f "/etc/nginx/sites-available/$full_domain" ]; then
-              existing_config_repo=$(grep -oP '(?<=Subdomain for repo: ).*' /etc/nginx/sites-available/$full_domain)
-              if [ "$existing_config_repo" != "${{ github.event.repository.name }}" ]; then
-                echo "A different repository ($existing_config_repo) uses this domain. Choose another domain or contact IWG."
-                exit 1
-              fi
-            fi
-
-            nginx_config="
-            # Below comment is used by the CI/CD pipeline, do not edit or remove
-            # Subdomain for repo: ${{ github.event.repository.name }}
-            server {
-              listen 443 ssl;
-              include snippets/self-signed.conf;
-              include snippets/ssl-params.conf;
+        id: provision-subdomain-prod
+        run: |
+          echo "🚀 Provisioning new subdomain for production"
+          curl -k -N -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: text/event-stream" \
+            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -d '{
+              "repository_name": "${{ github.event.repository.name }}",
+              "full_domain": "${{ inputs.full_app_url }}",
+              "port": "${{ inputs.app_port }}"
+            }' \
+            ${{ env.DEPLOYMENT_AGENT_URL }}/provision-subdomain | while IFS= read -r line; do
+              [ -z "$line" ] && continue
               
-              server_name $full_domain;
-        
-              location / {
-                  proxy_set_header   X-Forwarded-For \$remote_addr;
-                  proxy_set_header   Host \$http_host;
-                  proxy_pass         \"http://127.0.0.1:${{ inputs.app_port }}\";
-              }
-            }"
+              if [[ $line == data:* ]]; then
+                json_content="${line#data: }"
+                
+                type=$(echo "$json_content" | jq -r '.type')
+                content=$(echo "$json_content" | jq -r '.content')
+                
+                case $type in
+                  "info"|"progress")
+                    if [[ $content == *"nginx configuration"* ]]; then
+                      echo "⚙️ $content"
+                    elif [[ $content == *"test"* ]]; then
+                      echo "🔍 $content"
+                    elif [[ $content == *"reload"* ]]; then
+                      echo "🔄 $content"
+                    else
+                      echo "ℹ️ $content"
+                    fi
+                    ;;
+                  "success")
+                    if [[ $content == *"nginx configuration reloaded"* ]]; then
+                      echo "✅ Nginx configuration updated and reloaded successfully"
+                      echo "🌐 Production URL is now available at: http://${{ inputs.full_app_url }}"
+                    else
+                      echo "✅ $content"
+                    fi
+                    ;;
+                  "warning")
+                    echo "⚠️ $content"
+                    ;;
+                  "error")
+                    if [[ $content == *"nginx configuration test failed"* ]]; then
+                      echo "::error::❌ Nginx configuration test failed - please contact IWG"
+                    elif [[ $content == *"different repository"* ]]; then
+                      echo "::error::❌ Domain conflict: $content"
+                    else
+                      echo "::error::❌ $content"
+                    fi
+                    exit 1
+                    ;;
+                  "status")
+                    if [ "$(echo "$json_content" | jq -r '.exit_code')" != "0" ]; then
+                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
+                      exit 1
+                    fi
+                    ;;
+                esac
+              fi
+            done
 
-            file_path="/etc/nginx/sites-available/$full_domain"
-            echo "$nginx_config" > "$file_path"
-            ln -sf "$file_path" "/etc/nginx/sites-enabled/"
-
-            sudo nginx -t
-            if [ $? -eq 0 ]; then
-              sudo nginx -s reload
-              echo "Success: nginx configuration reloaded"
-            else
-              echo "Error: nginx configuration test failed. Please contact IWG immediately."
-              exit 1
-            fi
-
-      # Todo: make generic
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
         run: |
-          curl -k -N -X POST \
+          echo "➡️ Forwarding new subdomain to Godel"
+          curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
@@ -541,6 +666,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            echo "✅ Commenting on PR (finished build)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
@@ -568,7 +694,8 @@ jobs:
         # Logs utility should stay on the staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
         run: |
-          curl -k -N -X POST \
+          echo "🗑️ Removing artifacts from staging server"
+          curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
