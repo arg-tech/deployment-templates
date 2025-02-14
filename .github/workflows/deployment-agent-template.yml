@@ -124,6 +124,7 @@ jobs:
         run: |
           echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
 
+          success=false
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
@@ -148,6 +149,9 @@ jobs:
                     ;;
                   "success")
                     echo "✅ $content"
+                    if [[ $content == *"Successfully updated"* ]]; then
+                      success=true
+                    fi
                     ;;
                   "warning")
                     echo "⚠️ $content"
@@ -170,10 +174,12 @@ jobs:
               fi
             done
 
-          if [ ! -d ~/repos/"${{ github.event.repository.name }}" ]; then
-            echo "::error::❌ Repository directory not found after pull"
+          if [ "$success" != "true" ]; then
+            echo "::error::❌ Did not receive success confirmation from deployment agent"
             exit 1
           fi
+
+          echo "✅ Repository successfully pulled"
 
       - name: Create staging secrets
         id: create-secrets
