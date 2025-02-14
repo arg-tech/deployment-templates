@@ -40,8 +40,8 @@ jobs:
     steps:
       - name: Check subdomain and port uniqueness
         id: domain-and-port-checks
-        run: >-
-          🌐 Verifying availability of ${{ inputs.full_app_url }} \(port ${{ inputs.app_port }}\) on ${{ inputs.target_production_server_nickname }}
+        run: |
+          echo "🌐 Verifying availability of ${{ inputs.full_app_url }} (port ${{ inputs.app_port }}) on ${{ inputs.target_production_server_nickname }}"
 
           if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
               resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
@@ -84,8 +84,8 @@ jobs:
 
       - name: Check deployment agent version
         id: check-version
-        run: >-
-          🔍 Checking deployment agent compatibility for ${{ inputs.full_app_url }} \(targeting ${{ inputs.target_production_server_nickname }}\)
+        run: |
+          echo "🔍 Checking deployment agent compatibility for ${{ inputs.full_app_url }} (targeting ${{ inputs.target_production_server_nickname }})"
 
           REQUIRED_VERSION="1.0"
           
@@ -121,8 +121,8 @@ jobs:
 
       - name: Pull latest code
         id: pull-code
-        run: >-
-          📥 Pulling latest code for ${{ github.event.repository.name }} \(branch: ${{ github.head_ref }}\)
+        run: |
+          echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -170,8 +170,8 @@ jobs:
         id: create-secrets
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
-        run: >-
-          🔐 Setting up secrets for ${{ github.event.repository.name }}
+        run: |
+          echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
 
           staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("STAGING_" + .key): .value}) | add' -c)
           request_body=$(jq -n \
@@ -197,8 +197,8 @@ jobs:
       - name: Check if up-to-date with main
         id: check-main-sync
         if: github.base_ref == 'main'
-        run: >-
-          🔄 Checking if ${{ github.head_ref }} is up to date with main
+        run: |
+          echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
 
           response=$(curl -k -X POST \
             -H "Content-Type: application/json" \
@@ -220,8 +220,8 @@ jobs:
 
       - name: Build containers
         id: build-containers
-        run: >-
-          🏗️ Building containers for ${{ github.event.repository.name }}
+        run: |
+          echo "🏗️ Building containers for ${{ github.event.repository.name }}"
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -260,8 +260,8 @@ jobs:
 
       - name: Convert production subdomain to staging subdomain
         id: convert-subdomain
-        run: >-
-          🔄 Converting production subdomain to staging subdomain
+        run: |
+          echo "🔄 Converting production subdomain to staging subdomain"
 
           staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
           echo "staging_domain=$staging_domain" >> "$GITHUB_OUTPUT"
@@ -269,8 +269,8 @@ jobs:
 
       - name: Provision new subdomain
         id: provision-subdomain
-        run: >-
-          🚀 Provisioning new subdomain for ${{ github.event.repository.name }}
+        run: |
+          echo "🚀 Provisioning new subdomain for ${{ github.event.repository.name }}"
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -408,8 +408,8 @@ jobs:
     steps:
       - name: Get production hostname
         id: convert-nickname
-        run: >-
-          🔢 Converting server nickname '${{ inputs.target_production_server_nickname }}' to hostname
+        run: |
+          echo "🔢 Converting server nickname '${{ inputs.target_production_server_nickname }}' to hostname"
 
           case "${{ inputs.target_production_server_nickname }}" in
             "argand") production_host="argand"; ;;
@@ -455,7 +455,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "💬 Commenting on PR \(started build\)"
+            echo "💬 Commenting on PR (started build)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
@@ -479,7 +479,7 @@ jobs:
 
       - name: Pull latest code
         id: pull-code-prod
-        run: >-
+        run: |
           📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}
 
           curl -k -N -s -X POST \
@@ -528,7 +528,7 @@ jobs:
         id: create-secrets-prod
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
-        run: >-
+        run: |
           🔐 Setting up production secrets for ${{ github.event.repository.name }}
 
           production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("PRODUCTION_" + .key): .value}) | add' -c)
@@ -554,7 +554,7 @@ jobs:
 
       - name: Build containers
         id: build-containers-prod
-        run: >-
+        run: |
           🏗️ Building production containers for ${{ github.event.repository.name }}
 
           curl -k -N -s -X POST \
@@ -594,8 +594,8 @@ jobs:
 
       - name: Provision new subdomain
         id: provision-subdomain-prod
-        run: >-
-          🚀 Provisioning new subdomain for production \(${{ github.event.repository.name }}\)
+        run: |
+          🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -660,8 +660,8 @@ jobs:
 
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
-        run: >-
-          ➡️ Forwarding ${{ inputs.full_app_url }} to Godel \(via deployment agent\)
+        run: |
+          ➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)
 
           curl -k -N -s -X POST \
             -H "Content-Type: application/json" \
@@ -678,7 +678,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            echo "✅ Commenting on PR \(finished build\)"
+            echo "✅ Commenting on PR (finished build)"
             github.rest.issues.createComment({
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
@@ -704,7 +704,7 @@ jobs:
 
       - name: Remove artifacts from staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
-        run: >-
+        run: |
           🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}
 
           curl -k -N -s -X POST \
