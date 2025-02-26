@@ -1,0 +1,564 @@
+name: Deploy template
+on:
+  workflow_call:
+    inputs:
+      target_production_server_nickname:
+        required: true
+        type: string
+      full_app_url:
+        required: true
+        type: string
+      app_port:
+        required: true
+        type: string
+    secrets:
+      server_staging_ssh_key:
+        required: true
+      sshgateway_ssh_key:
+        required: true
+
+env:
+  STAGING_SERVER_HOST: 178.79.188.16
+  SSH_GATEWAY_HOST: sshgateway.computing.dundee.ac.uk
+  DEPLOY_SSH_USER: deploy-user
+  # Syntax for workflow names is: job-name-in-caller-workflow / job-name-in-this-workflow https://stackoverflow.com/questions/71240338/
+  STAGING_WORKFLOW_NAME: Environments / Staging
+  PRODUCTION_WORKFLOW_NAME: Environments / Production
+  SLACK_CHANNEL_ID: C072R6HPW21
+  COMMAND_TIMEOUT: 30m
+
+jobs:
+  deploy-staging:
+    name: "Staging"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest    
+    steps:
+      - name: Check subdomain and port uniqueness
+        id: domain-and-port-checks
+        run: |
+          if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
+              resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
+          elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
+              resource_lister_url="http://resource-lister.godel.arg.tech/get-sites"
+          else
+              echo "::error::Invalid server nickname";
+              exit 1;
+          fi
+
+          deployed_services=$(curl -s $resource_lister_url)
+
+          services_with_matching_repo_name=$(echo $deployed_services | jq '.[] | select(.repository == "${{ github.event.repository.name }}")')
+          services_with_matching_domain=$(echo $deployed_services | jq '.[] | select(.domain == "${{ inputs.full_app_url }}")')
+          services_with_matching_port=$(echo $deployed_services | jq '.[] | select(.port == "${{ inputs.app_port }}")')
+
+          if [[ -n "$services_with_matching_repo_name" ]]
+          then
+              echo "INFO: Found an existing deployment for this repository";
+              
+              if [[ -n "$services_with_matching_port" && "$services_with_matching_repo_name" != "$services_with_matching_port" ]]; then
+                  echo "::error::Port has been changed to one occupied by a different service";
+                  exit 1;
+              fi
+
+              if [[ "$services_with_matching_repo_name" != "$services_with_matching_domain" ]]; then
+                  echo "::error::Attempted to change the subdomain";
+                  exit 1;
+              fi
+          else
+              echo "INFO: Did not find an existing deployment for this repository";
+
+              if [[ -n "$services_with_matching_domain" || -n "$services_with_matching_port" ]]; then
+                  echo "::error::Port or subdomain occupied by an existing service";
+                  exit 1;
+              fi
+          fi
+
+          echo "INFO: No issues found";
+
+      - name: Pull latest code
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.STAGING_SERVER_HOST }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ secrets.server_staging_ssh_key }}
+          script: |
+            cd ~/repos
+            if [ ! -d "${{ github.event.repository.name }}" ]; then
+              git clone git@github.com:arg-tech/${{ github.event.repository.name }}.git
+              echo "Repository cloned"
+            fi
+              
+            cd "${{ github.event.repository.name }}"
+            echo "Deleting the local branch in case an old branch with the same name exists"
+            git checkout main
+            git branch -D ${{ github.head_ref }}
+            
+            git fetch
+            git checkout ${{ github.head_ref }}
+            git reset --hard HEAD
+            git merge '@{u}'
+            
+            echo "Repository pulled and updated"
+
+      - name: Create staging secrets
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        with:
+          host: ${{ env.STAGING_SERVER_HOST }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ secrets.server_staging_ssh_key }}
+          envs: SECRETS_CONTEXT
+          script: |
+            cd ~/repos/${{ github.event.repository.name }}
+            mkdir -p ./.secrets
+
+            stage_prefix="STAGING_"
+
+            save_to_file() {
+                local key=$(echo "$1" | base64 --decode)
+                local value=$(echo "$2" | base64 --decode)
+                local key_no_prefix=$(echo "${key#*$stage_prefix}")
+                echo "$value" > ./.secrets/"$key_no_prefix".txt
+                echo "Saved $key_no_prefix"
+            }
+
+            printf "%s" "$SECRETS_CONTEXT" | jq -r "to_entries[] | select(.key | startswith(\"$stage_prefix\")) | \"\(.key | @base64) \(.value | @base64)\"" | while read -r key value; do
+                save_to_file "$key" "$value"
+            done
+
+      - name: Check if up-to-date with main
+        if: github.base_ref == 'main'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.STAGING_SERVER_HOST }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ secrets.server_staging_ssh_key }}
+          script: |
+              cd ~/repos/${{ github.event.repository.name }}
+              if ! git merge-base --is-ancestor origin/main ${{ github.event.pull_request.head.sha }};
+              then echo "This branch is not up to date with main. It must be brought up to date so that staging is representative of production."; exit 1; 
+              fi
+              echo "This branch is up to date with main and can be safely merged."
+
+      - name: Build containers
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.STAGING_SERVER_HOST }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ secrets.server_staging_ssh_key }}
+          command_timeout: ${{env.COMMAND_TIMEOUT}}
+          script: |
+            cd ~/repos/${{ github.event.repository.name }}
+            docker compose up -d --build
+
+      - name: Convert production subdomain to staging subdomain
+        id: convert-subdomain
+        run: |
+          staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
+          echo "staging_domain=$staging_domain" >> "$GITHUB_OUTPUT"
+          echo "Staging domain is: $staging_domain"
+
+      - name: Provision new subdomain
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.STAGING_SERVER_HOST }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ secrets.server_staging_ssh_key }}
+          script: |
+            full_domain=${{ steps.convert-subdomain.outputs.staging_domain }}
+
+            if [ -f "/etc/nginx/sites-available/$full_domain" ]; then
+              existing_config_repo=$(grep -oP '(?<=Subdomain for repo: ).*' /etc/nginx/sites-available/$full_domain)
+              if [ "$existing_config_repo" != "${{ github.event.repository.name }}" ]; then
+                echo "A different repository ($existing_config_repo) uses this domain. Choose another domain or contact IWG."
+                exit 1
+              fi
+            fi
+
+            nginx_config="
+            # Below comment is used by the CI/CD pipeline, do not edit or remove
+            # Subdomain for repo: ${{ github.event.repository.name }}
+            server {
+              listen 443 ssl;
+              include /etc/nginx/ssl/ssl.conf;
+
+              server_name $full_domain;
+        
+              location / {
+                  proxy_set_header   X-Forwarded-For \$remote_addr;
+                  proxy_set_header   Host \$http_host;
+                  proxy_pass         \"http://host.docker.internal:${{ inputs.app_port }}\";
+              }
+            }"
+
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$full_domain"
+            echo "$nginx_config" > "$file_path"
+
+            docker exec nginx-reverse-proxy nginx -t
+            if [ $? -eq 0 ]; then
+              docker exec nginx-reverse-proxy nginx -s reload
+              echo "Success: nginx configuration reloaded"
+            else
+              echo "Error: nginx configuration test failed. Please contact IWG."
+              exit 1
+            fi
+
+      - name: Get build details URL
+        uses: actions/github-script@v7
+        continue-on-error: true
+        if: always()
+        id: get-job-url
+        with:
+          script: |
+            const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            html_url = workflow_run.jobs.find((job) => job.name === "${{env.STAGING_WORKFLOW_NAME}}").html_url
+            html_url += "?pr=${{github.event.pull_request.number}}"
+            console.log(`URL is ${html_url}`)
+            return html_url
+          result-encoding: string
+
+      - name: Compose ending message
+        id: compose-ending-message
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |    
+            console.log(`Job status: ${{ job.status }}`)        
+            const message = (`${{ job.status }}` === 'failure')
+              ? `
+              **Build (#${{github.run_number}}) failed to deploy to staging** ❌
+                  \- Please check the [build log](${{steps.get-job-url.outputs.result}}) for details.
+
+              **Note:** Once you correct the error, simply push the new commit to the same branch and it will automatically re-deploy to staging.
+              ` : `
+              **New build (#${{github.run_number}}) deployed to staging** 🚧
+                  \- Test it on the staging URL: [${{steps.convert-subdomain.outputs.staging_domain}}](http://${{steps.convert-subdomain.outputs.staging_domain}})
+                  \- If you update the PR or create another one, a new build will be created, replacing this one
+                  \- [View build log](${{steps.get-job-url.outputs.result}})
+                      
+              **Note:** If this PR is to main, only authorized users will be allowed to merge. Once merged to main, the build will be promoted to the production server. Ensure the staging build works correctly before merging. 
+              `
+            return message;
+
+      - name: Comment on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `${{steps.compose-ending-message.outputs.result}}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
+
+      # https://app.slack.com/block-kit-builder https://www.text-utils.com/json-formatter/
+      - name: Post update to Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{env.SLACK_CHANNEL_ID}}
+          payload: >
+                {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*Staging or production:* Staging \n *Outcome:* ${{ job.status }}"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
+
+  deploy-production:
+    name: "Production"
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get production hostname
+        id: convert-nickname
+        run: |
+          case "${{ inputs.target_production_server_nickname }}" in
+            "argand") production_host="argand"; ;;
+            "godel") production_host="godel"; ;;
+            *) echo "Invalid nickname"; exit 1 ;;
+          esac
+          echo "production_host=$production_host" >> "$GITHUB_OUTPUT"
+          echo "Converted server nickname '${{ inputs.target_production_server_nickname }}' to hostname '$production_host'."
+
+      - name: Get PR number
+        uses: actions/github-script@v7
+        id: get-pr-number
+        with:
+          script: |
+            return (await
+              github.rest.repos.listPullRequestsAssociatedWithCommit({
+                commit_sha: context.sha,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              })).data[0].number;
+          result-encoding: string
+
+      - name: Get build details URL
+        uses: actions/github-script@v7
+        continue-on-error: true
+        id: get-job-url
+        with:
+          script: |
+            const { data: workflow_run } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId
+            });
+            html_url = workflow_run.jobs.find((job) => job.name === "${{env.PRODUCTION_WORKFLOW_NAME}}").html_url
+            html_url += "?pr=${{steps.get-pr-number.outputs.result}}"
+            console.log(`URL is ${html_url}`)
+            return html_url
+          result-encoding: string
+
+      - name: Comment on PR (started build)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: ${{steps.get-pr-number.outputs.result}},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: ` 
+              **In progress: build being promoted to production** 🏗️ 
+                \- Target server: ${{inputs.target_production_server_nickname}}
+                \- [View build log](${{steps.get-job-url.outputs.result}})
+              `
+            })
+
+      # https://app.slack.com/block-kit-builder https://www.text-utils.com/json-formatter/
+      - name: Post update to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{env.SLACK_CHANNEL_ID}}
+          payload: >
+                {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*In progress: build being promoted to production* 🏗️"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
+
+      - name: Pull latest code
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.convert-nickname.outputs.production_host }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
+          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
+          proxy_username: ${{ env.DEPLOY_SSH_USER }}
+          proxy_key: ${{ secrets.sshgateway_ssh_key }}
+          script: |
+            cd ~/repos
+            if [ ! -d "${{ github.event.repository.name }}" ]; then
+              git clone git@github.com:arg-tech/${{ github.event.repository.name }}.git
+              echo "Repository cloned"
+            fi
+              
+            cd "${{ github.event.repository.name }}"
+            git fetch
+            git checkout ${{ github.head_ref }}
+            git reset --hard HEAD
+            git merge '@{u}'
+            echo "Repository pulled and updated"  
+
+      - name: Create production secrets
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        with:
+          host: ${{ steps.convert-nickname.outputs.production_host }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
+          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
+          proxy_username: ${{ env.DEPLOY_SSH_USER }}
+          proxy_key: ${{ secrets.sshgateway_ssh_key }}
+          envs: SECRETS_CONTEXT
+          script: |
+            cd ~/repos/${{ github.event.repository.name }}
+            mkdir -p ./.secrets
+
+            stage_prefix="PRODUCTION_"
+
+            save_to_file() {
+                local key=$(echo "$1" | base64 --decode)
+                local value=$(echo "$2" | base64 --decode)
+                local key_no_prefix=$(echo "${key#*$stage_prefix}")
+                echo "$value" > ./.secrets/"$key_no_prefix".txt
+                echo "Saved $key_no_prefix"
+            }
+            
+            printf "%s" "$SECRETS_CONTEXT" | jq -r 'to_entries[] | select(.key | startswith("'"$stage_prefix"'")) | "\(.key | @base64) \(.value | @base64)"' | while read -r key value; do
+                save_to_file "$key" "$value"
+            done
+
+      - name: Build containers
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.convert-nickname.outputs.production_host }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
+          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
+          proxy_username: ${{ env.DEPLOY_SSH_USER }}
+          proxy_key: ${{ secrets.sshgateway_ssh_key }}
+          command_timeout: ${{env.COMMAND_TIMEOUT}}
+          script: |
+            cd ~/repos/${{ github.event.repository.name }}
+            docker compose up -d --build
+
+      - name: Provision new subdomain
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.convert-nickname.outputs.production_host }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ inputs.target_production_server_nickname == 'argand' && secrets.argand_ssh_key || inputs.target_production_server_nickname == 'godel' && secrets.godel_ssh_key }}
+          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
+          proxy_username: ${{ env.DEPLOY_SSH_USER }}
+          proxy_key: ${{ secrets.sshgateway_ssh_key }}
+          script: |
+            full_domain=${{ inputs.full_app_url }}
+
+            if [ -f "/etc/nginx/sites-available/$full_domain" ]; then
+              existing_config_repo=$(grep -oP '(?<=Subdomain for repo: ).*' /etc/nginx/sites-available/$full_domain)
+              if [ "$existing_config_repo" != "${{ github.event.repository.name }}" ]; then
+                echo "A different repository ($existing_config_repo) uses this domain. Choose another domain or contact IWG."
+                exit 1
+              fi
+            fi
+
+            nginx_config="
+            # Below comment is used by the CI/CD pipeline, do not edit or remove
+            # Subdomain for repo: ${{ github.event.repository.name }}
+            server {
+              listen 443 ssl;
+              include /etc/nginx/ssl/ssl.conf;
+
+              server_name $full_domain;
+        
+              location / {
+                  proxy_set_header   X-Forwarded-For \$remote_addr;
+                  proxy_set_header   Host \$http_host;
+                  proxy_pass         \"http://host.docker.internal:${{ inputs.app_port }}\";
+              }
+            }"
+
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$full_domain"
+            echo "$nginx_config" > "$file_path"
+
+            docker exec nginx-reverse-proxy nginx -t
+            if [ $? -eq 0 ]; then
+              docker exec nginx-reverse-proxy nginx -s reload
+              echo "Success: nginx configuration reloaded"
+            else
+              echo "Error: nginx configuration test failed. Please contact IWG immediately."
+              exit 1
+            fi
+
+      # Todo: make generic
+      - name: Forward new subdomain to Godel
+        uses: appleboy/ssh-action@v1.0.3
+        if: ${{ inputs.target_production_server_nickname == 'godel' }}
+        with:
+          host: argand
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{secrets.argand_ssh_key}}
+          proxy_host: ${{ env.SSH_GATEWAY_HOST }}
+          proxy_username: ${{ env.DEPLOY_SSH_USER }}
+          proxy_key: ${{ secrets.sshgateway_ssh_key }}
+          script: |
+            full_domain=${{ inputs.full_app_url }}
+
+            if [ -f "/etc/nginx/sites-available/$full_domain" ]; then
+              existing_config_repo=$(grep -oP '(?<=Subdomain for repo: ).*' /etc/nginx/sites-available/$full_domain)
+              if [ "$existing_config_repo" != "${{ github.event.repository.name }}" ]; then
+                echo "A different repository ($existing_config_repo) uses this domain. Choose another domain or contact IWG."
+                exit 1
+              fi
+            fi
+
+            nginx_config="
+            # Below comments are used by the CI/CD pipeline, do not edit or remove
+            # Subdomain for repo: ${{ github.event.repository.name }}
+            # Domain forwarded to: Godel
+            server {
+              listen 443 ssl;
+              server_name $full_domain;
+
+              include /etc/nginx/ssl/ssl.conf;
+              
+              location / {
+                    proxy_pass https://134.36.36.77:443;
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto \$scheme;
+                    proxy_ssl_verify off;
+                    proxy_ssl_protocols TLSv1.3;
+                }
+            }"
+
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/forwards-to-other-servers/$full_domain"
+            echo "$nginx_config" > "$file_path"
+
+            docker exec nginx-reverse-proxy nginx -t
+            if [ $? -eq 0 ]; then
+              docker exec nginx-reverse-proxy nginx -s reload
+              echo "Success: nginx configuration reloaded"
+            else
+              echo "Error: nginx configuration test failed. Please contact IWG immediately."
+              exit 1
+            fi
+
+      - name: Comment on PR (finished build)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: ${{steps.get-pr-number.outputs.result}},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: ` 
+              **Build deployed to production** 🏠 
+                \- Target server: ${{inputs.target_production_server_nickname}}
+                \- Your app's URL: [${{inputs.full_app_url}}](http://${{inputs.full_app_url}})
+                \- Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts
+                \- [View build log](${{steps.get-job-url.outputs.result}})
+              `
+            })
+
+      # https://app.slack.com/block-kit-builder https://www.text-utils.com/json-formatter/
+      - name: Post update to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{env.SLACK_CHANNEL_ID}}
+          payload: >
+                {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*Build deployed to production* 🏠 \n - Target server: ${{inputs.target_production_server_nickname}} \n - Your app's URL: ${{inputs.full_app_url}} \n - Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
+
+      - name: Remove artifacts from staging server
+        # Logs utility should stay on the staging server
+        if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.STAGING_SERVER_HOST }}
+          username: ${{ env.DEPLOY_SSH_USER }}
+          key: ${{ secrets.server_staging_ssh_key }}
+          script: |
+            cd ~/repos/${{ github.event.repository.name }}
+            docker compose down
+
+            staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
+            file_path="/etc/nginx/nginx-reverse-proxy/sites-enabled/automatic-deployments/$staging_domain"
+            rm $file_path
+
+            docker exec nginx-reverse-proxy nginx -t
+            if [ $? -eq 0 ]; then
+              docker exec nginx-reverse-proxy nginx -s reload
+              echo "Success: nginx configuration reloaded"
+            else
+              echo "Error: nginx configuration test on STAGING failed. Please contact IWG."
+              exit 1
+            fi
