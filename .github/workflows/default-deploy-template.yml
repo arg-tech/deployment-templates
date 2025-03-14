@@ -164,8 +164,7 @@ jobs:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
           echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
-
-          staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("STAGING_" + .key): .value}) | add' -c)
+          staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("STAGING_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
             --arg repo "${{ github.event.repository.name }}" \
             --arg secrets "$staging_secrets" \
@@ -590,7 +589,7 @@ jobs:
         run: |
           echo "🔐 Setting up production secrets for ${{ github.event.repository.name }}"
 
-          production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map({("PRODUCTION_" + .key): .value}) | add' -c)
+          production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("PRODUCTION_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
             --arg repo "${{ github.event.repository.name }}" \
             --arg secrets "$production_secrets" \
