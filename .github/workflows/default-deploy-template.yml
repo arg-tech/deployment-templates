@@ -845,14 +845,14 @@ jobs:
                     echo "⚠️ $content"
                     ;;
                   "error")
-                    echo "::error::❌ $content"
-                    exit 1
+                    echo "❌ $content"
+                    echo "::warning title="Error while removing staging"::❌ $content"
                     ;;
                   "status")
                     exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
                     if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
+                      echo "❌ Command failed with exit code $exit_code"
+                      echo "::warning title="Error while removing staging"::❌ Exit code $exit_code"
                     fi
                     ;;
                 esac
