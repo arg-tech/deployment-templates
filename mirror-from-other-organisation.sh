@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Note: if using this, set PRs to rebase instead of merge in the destination repository settings. 
+# Otherwise, the 'Check if main branch is up to date' check will fail.
+
 # 1. Create empty destination repository within arg-tech
 # 2. Specify the source and destination repositories in the SOURCE_REPO and DESTINATION_REPO variables
 # 3. After running the script, create a new main branch in the destination repository
