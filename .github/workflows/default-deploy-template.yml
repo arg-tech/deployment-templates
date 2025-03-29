@@ -543,7 +543,7 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
 
-deploy-production:
+  deploy-production:
     name: "Production"
     if: github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-latest
