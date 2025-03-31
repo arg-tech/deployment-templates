@@ -12,7 +12,9 @@ on:
         required: true
         type: string
     secrets:
-      deployment_agent_api_key:
+      DEPLOYMENT_AGENT_API_KEY_STAGING:
+        required: true
+      DEPLOYMENT_AGENT_API_KEY_PRODUCTION:
         required: true
       deploy_user_read_token:
         required: true
@@ -22,6 +24,7 @@ env:
   STAGING_WORKFLOW_NAME: Environments / Staging
   PRODUCTION_WORKFLOW_NAME: Environments / Production
   SLACK_CHANNEL_ID: C072R6HPW21
+  REQUIRED_VERSION: "1.0"
 
 jobs:
   deploy-staging:
@@ -81,8 +84,6 @@ jobs:
           deployment_agent_url="https://deployment-agent.staging.arg.tech"
           echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
           echo "ℹ️ Deployment agent URL: $deployment_agent_url"
-
-          REQUIRED_VERSION="1.0"
           
           response=$(curl -k --no-progress-meter \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
@@ -106,8 +107,8 @@ jobs:
             exit 1
           fi
           
-          if [ "$agent_version" != "$REQUIRED_VERSION" ]; then
-            echo "::error::❌ Version mismatch - Required: $REQUIRED_VERSION, Found: $agent_version"
+          if [ "$agent_version" != "${{ env.REQUIRED_VERSION }}" ]; then
+            echo "::error::❌ Version mismatch - Required: ${{ env.REQUIRED_VERSION }}, Found: $agent_version"
             exit 1
           fi
           
@@ -119,42 +120,66 @@ jobs:
         run: |
           echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "${{ github.head_ref }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
           echo "✅ Repository successfully pulled"
 
@@ -164,44 +189,69 @@ jobs:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
           echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
+
           staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("STAGING_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
             --arg repo "${{ github.event.repository.name }}" \
             --arg secrets "$staging_secrets" \
             '{repository_name: $repo, secrets_context: $secrets}')
           
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d "$request_body" \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
           echo "✅ Secrets created successfully"
 
@@ -211,42 +261,66 @@ jobs:
         run: |
           echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "${{ github.head_ref }}",
               "commit_sha": "${{ github.event.pull_request.head.sha }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url}}/check-main-sync | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url}}/check-main-sync)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
           echo "✅ Branch is up to date with main"
 
@@ -255,40 +329,64 @@ jobs:
         run: |
           echo "🏗️ Building containers for ${{ github.event.repository.name }}"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "build")
-                    echo "🔨 $content"
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Build failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "🔨 $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Build failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
       - name: Convert production subdomain to staging subdomain
         id: convert-subdomain
@@ -304,67 +402,80 @@ jobs:
         run: |
           echo "🚀 Provisioning new subdomain for ${{ github.event.repository.name }}"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "${{ steps.convert-subdomain.outputs.staging_domain }}",
               "port": "${{ inputs.app_port }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    if [[ $content == *"nginx configuration"* ]]; then
-                      echo "⚙️ $content"
-                    elif [[ $content == *"test"* ]]; then
-                      echo "🔍 $content"
-                    elif [[ $content == *"reload"* ]]; then
-                      echo "🔄 $content"
-                    else
-                      echo "ℹ️ $content"
-                    fi
-                    ;;
-                  "success")
-                    if [[ $content == *"nginx configuration reloaded"* ]]; then
-                      echo "✅ Nginx configuration updated and reloaded successfully"
-                      echo "🌐 Subdomain is now available at: http://${{ steps.convert-subdomain.outputs.staging_domain }}"
-                    else
-                      echo "✅ $content"
-                    fi
-                    ;;
-                  "warning")
-                    echo "⚠️ $content"
-                    ;;
-                  "error")
-                    if [[ $content == *"nginx configuration test failed"* ]]; then
-                      echo "::error::❌ Nginx configuration test failed - please contact IWG"
-                    elif [[ $content == *"different repository"* ]]; then
-                      echo "::error::❌ Domain conflict: $content"
-                    else
-                      echo "::error::❌ $content"
-                    fi
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $(echo "$json_content" | jq -r '.exit_code')"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "success")
+                  if [[ $content == *"nginx configuration reloaded"* ]]; then
+                    echo "✅ Nginx configuration updated and reloaded successfully"
+                    echo "🌐 Subdomain is now available at: http://${{ steps.convert-subdomain.outputs.staging_domain }}"
+                  else
+                    echo "✅ $content"
+                  fi
+                  ;;
+                "error")
+                  if [[ $content == *"nginx configuration test failed"* ]]; then
+                    echo "::error::❌ Nginx configuration test failed - please contact IWG"
+                  elif [[ $content == *"different repository"* ]]; then
+                    echo "::error::❌ Domain conflict: $content"
+                  else
+                    echo "::error::❌ $content"
+                  fi
+                  exit 1
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
       - name: Get build details URL
         uses: actions/github-script@v7
@@ -450,8 +561,6 @@ jobs:
 
           echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
           echo "ℹ️ Deployment agent URL: $deployment_agent_url"
-
-          REQUIRED_VERSION="1.0"
           
           response=$(curl -k --no-progress-meter \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
@@ -475,8 +584,8 @@ jobs:
             exit 1
           fi
           
-          if [ "$agent_version" != "$REQUIRED_VERSION" ]; then
-            echo "::error::❌ Version mismatch - Required: $REQUIRED_VERSION, Found: $agent_version"
+          if [ "$agent_version" != "${{ env.REQUIRED_VERSION }}" ]; then
+            echo "::error::❌ Version mismatch - Required: ${{ env.REQUIRED_VERSION }}, Found: $agent_version"
             exit 1
           fi
           
@@ -543,42 +652,66 @@ jobs:
         run: |
           echo "📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "main"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
           echo "✅ Repository successfully pulled"
 
@@ -595,38 +728,62 @@ jobs:
             --arg secrets "$production_secrets" \
             '{repository_name: $repo, secrets_context: $secrets}')
           
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d "$request_body" \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
           echo "✅ Production secrets created successfully"
 
@@ -635,155 +792,213 @@ jobs:
         run: |
           echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "build")
-                    echo "🔨 $content"
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Build failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "🔨 $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Build failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
       - name: Provision new subdomain
         id: provision-subdomain-prod
         run: |
           echo "🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "${{ inputs.full_app_url }}",
               "port": "${{ inputs.app_port }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    if [[ $content == *"nginx configuration"* ]]; then
-                      echo "⚙️ $content"
-                    elif [[ $content == *"test"* ]]; then
-                      echo "🔍 $content"
-                    elif [[ $content == *"reload"* ]]; then
-                      echo "🔄 $content"
-                    else
-                      echo "ℹ️ $content"
-                    fi
-                    ;;
-                  "success")
-                    if [[ $content == *"nginx configuration reloaded"* ]]; then
-                      echo "✅ Nginx configuration updated and reloaded successfully"
-                      echo "🌐 Production URL is now available at: http://${{ inputs.full_app_url }}"
-                    else
-                      echo "✅ $content"
-                    fi
-                    ;;
-                  "warning")
-                    echo "⚠️ $content"
-                    ;;
-                  "error")
-                    if [[ $content == *"nginx configuration test failed"* ]]; then
-                      echo "::error::❌ Nginx configuration test failed - please contact IWG"
-                    elif [[ $content == *"different repository"* ]]; then
-                      echo "::error::❌ Domain conflict: $content"
-                    else
-                      echo "::error::❌ $content"
-                    fi
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "success")
+                  if [[ $content == *"nginx configuration reloaded"* ]]; then
+                    echo "✅ Nginx configuration updated and reloaded successfully"
+                    echo "🌐 Production URL is now available at: http://${{ inputs.full_app_url }}"
+                  else
+                    echo "✅ $content"
+                  fi
+                  ;;
+                "error")
+                  if [[ $content == *"nginx configuration test failed"* ]]; then
+                    echo "::error::❌ Nginx configuration test failed - please contact IWG"
+                  elif [[ $content == *"different repository"* ]]; then
+                    echo "::error::❌ Domain conflict: $content"
+                  else
+                    echo "::error::❌ $content"
+                  fi
+                  exit 1
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
         run: |
           echo "➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)"
 
-          curl -k -N --no-progress-meter -X POST \
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "${{ inputs.full_app_url }}",
               "target_server": "godel"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/forward-subdomain | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/forward-subdomain)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "success")
-                    echo "✅ $content"
-                    ;;
-                  "warning")
-                    echo "⚠️ $content"
-                    ;;
-                  "error")
-                    echo "::error::❌ $content"
-                    exit 1
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::error::❌ Command failed with exit code $exit_code"
-                      exit 1
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "success")
+                  echo "✅ $content"
+                  ;;
+                "error")
+                  echo "::error::❌ $content"
+                  exit 1
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::error::❌ Command failed with exit code $exit_code"
+                    exit 1
+                  fi
+                  echo "✅ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
 
       - name: Comment on PR (finished build)
         uses: actions/github-script@v7
@@ -811,48 +1026,73 @@ jobs:
                 {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":"_Update in repository ${{ github.event.repository.name }}_"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*Build deployed to production* 🏠 \n - Target server: ${{inputs.target_production_server_nickname}} \n - Your app's URL: ${{inputs.full_app_url}} \n - Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts"}},{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"View build details"},"value":"click_me","url":"${{steps.get-job-url.outputs.result}}"}]}]}
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
-
       - name: Remove artifacts from staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
         run: |
           echo "🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}"
-
-          curl -k -N --no-progress-meter -X POST \
+          
+          # Store the staging domain for easier reference
+          staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
+          echo "ℹ️ Target staging domain: $staging_domain"
+          
+          # Execute curl with proper error handling
+          response=$(curl -k -s -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.deployment_agent_api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d "{
               \"repository_name\": \"${{ github.event.repository.name }}\",
-              \"full_domain\": \"$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')\"
+              \"full_domain\": \"$staging_domain\"
             }" \
-            https://deployment-agent.staging.arg.tech/delete-deployed-service | while IFS= read -r line; do
-              [ -z "$line" ] && continue
+            https://deployment-agent.staging.arg.tech/delete-deployed-service)
+          
+          # Extract HTTP status code from the last line
+          http_code=$(echo "$response" | tail -n1)
+          response_body=$(echo "$response" | sed '$d')
+          
+          # Check HTTP status code
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error::❌ API request failed with HTTP status $http_code"
+            echo "$response_body"
+            exit 1
+          fi
+          
+          # Process the SSE stream from the response
+          echo "$response_body" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            if [[ $line == data:* ]]; then
+              json_content="${line#data: }"
               
-              if [[ $line == data:* ]]; then
-                json_content="${line#data: }"
-                
-                type=$(echo "$json_content" | jq -r '.type')
-                content=$(echo "$json_content" | jq -r '.content')
-                
-                case $type in
-                  "stdout")
-                    echo "ℹ️ $content"
-                    ;;
-                  "success")
-                    echo "✅ $content"
-                    ;;
-                  "warning")
-                    echo "⚠️ $content"
-                    ;;
-                  "error")
-                    echo "::warning title="Error while removing staging"::❌ $content"
-                    ;;
-                  "status")
-                    exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
-                    if [ "$exit_code" != "0" ]; then
-                      echo "::warning title="Error while removing staging"::❌ Exit code $exit_code"
-                    fi
-                    ;;
-                esac
+              # Check if the JSON is valid
+              if ! echo "$json_content" | jq -e . > /dev/null 2>&1; then
+                echo "::warning::⚠️ Invalid JSON response: $json_content"
+                continue
               fi
-            done
+              
+              type=$(echo "$json_content" | jq -r '.type')
+              content=$(echo "$json_content" | jq -r '.content')
+              
+              case $type in
+                "stdout")
+                  echo "ℹ️ $content"
+                  ;;
+                "status")
+                  exit_code=$(echo "$json_content" | jq -r '.exit_code // "0"')
+                  if [ "$exit_code" != "0" ]; then
+                    echo "::warning title=\"Error while removing staging\"::⚠️ Exit code $exit_code"
+                  else
+                    echo "✅ $content"
+                  fi
+                  ;;
+                "error")
+                    echo "::warning title="Error while removing staging"::⚠️ $content"
+                  ;;
+                *)
+                  echo "ℹ️ $type: $content"
+                  ;;
+              esac
+            fi
+          done
+          
+          echo "✅ Staging cleanup process completed"
