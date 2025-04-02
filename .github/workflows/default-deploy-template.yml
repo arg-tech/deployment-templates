@@ -28,7 +28,7 @@ env:
 
 jobs:
   deploy-staging:
-    timeout-minutes: 3
+    timeout-minutes: 2
     name: "Staging"
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest    
@@ -552,7 +552,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
 
   deploy-production:
-    timeout-minutes: 3
+    timeout-minutes: 2
     name: "Production"
     if: github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-latest
