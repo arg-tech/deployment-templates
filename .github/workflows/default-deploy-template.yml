@@ -36,8 +36,8 @@ jobs:
       - name: Check subdomain and port uniqueness
         id: domain-and-port-checks
         run: |
-          set -euo pipefail
           echo "🌐 Verifying availability of ${{ inputs.full_app_url }} (port ${{ inputs.app_port }}) on ${{ inputs.target_production_server_nickname }}"
+          set -euo pipefail
 
           if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
               resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
@@ -81,8 +81,8 @@ jobs:
       - name: Identify and validate deployment agent
         id: identify-deployment-agent
         run: |
-          set -euo pipefail
           echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
 
           deployment_agent_url="https://deployment-agent.staging.arg.tech"
           echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
@@ -121,10 +121,10 @@ jobs:
       - name: Pull latest code
         id: pull-code
         run: |
-          set -euo pipefail
           echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
@@ -133,21 +133,7 @@ jobs:
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "${{ github.head_ref }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -192,8 +178,8 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          set -euo pipefail
           echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("STAGING_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
@@ -201,26 +187,12 @@ jobs:
             --arg secrets "$staging_secrets" \
             '{repository_name: $repo, secrets_context: $secrets}')
           
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d "$request_body" \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -264,10 +236,10 @@ jobs:
         id: check-main-sync
         if: github.base_ref == 'main'
         run: |
-          set -euo pipefail
           echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
@@ -276,21 +248,7 @@ jobs:
               "branch_name": "${{ github.head_ref }}",
               "commit_sha": "${{ github.event.pull_request.head.sha }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url}}/check-main-sync)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url}}/check-main-sync | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -333,31 +291,17 @@ jobs:
       - name: Build containers
         id: build-containers
         run: |
-          set -euo pipefail
           echo "🏗️ Building containers for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -407,10 +351,10 @@ jobs:
       - name: Provision new subdomain
         id: provision-subdomain
         run: |
-          set -euo pipefail
           echo "🚀 Provisioning new subdomain for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
@@ -419,21 +363,7 @@ jobs:
               "full_domain": "${{ steps.convert-subdomain.outputs.staging_domain }}",
               "port": "${{ inputs.app_port }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -560,8 +490,8 @@ jobs:
       - name: Identify and validate deployment agent
         id: identify-deployment-agent
         run: |
-          set -euo pipefail
           echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
           
           case "${{ inputs.target_production_server_nickname }}" in
             "argand") deployment_agent_url="https://deployment-agent.argand.arg.tech"; ;;
@@ -660,10 +590,10 @@ jobs:
       - name: Pull latest code
         id: pull-code-prod
         run: |
-          set -euo pipefail
           echo "📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
@@ -672,21 +602,7 @@ jobs:
               "repository_name": "${{ github.event.repository.name }}",
               "branch_name": "main"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/pull-code | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -731,8 +647,8 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          set -euo pipefail
           echo "🔐 Setting up production secrets for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("PRODUCTION_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
@@ -740,26 +656,12 @@ jobs:
             --arg secrets "$production_secrets" \
             '{repository_name: $repo, secrets_context: $secrets}')
           
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d "$request_body" \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -802,32 +704,18 @@ jobs:
       - name: Build containers
         id: build-containers-prod
         run: |
+          echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
           set -euo pipefail
           
-          echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/build-container | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -868,10 +756,10 @@ jobs:
       - name: Provision new subdomain
         id: provision-subdomain-prod
         run: |
-          set -euo pipefail
           echo "🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
@@ -880,21 +768,7 @@ jobs:
               "full_domain": "${{ inputs.full_app_url }}",
               "port": "${{ inputs.app_port }}"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/provision-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -949,10 +823,10 @@ jobs:
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
         run: |
-          set -euo pipefail
           echo "➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)"
+          set -euo pipefail
 
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
@@ -961,21 +835,7 @@ jobs:
               "full_domain": "${{ inputs.full_app_url }}",
               "target_server": "godel"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/forward-subdomain)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/forward-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
@@ -1045,15 +905,15 @@ jobs:
       - name: Remove artifacts from staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
         run: |
-          set -euo pipefail
           echo "🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}"
+          set -euo pipefail
           
           # Store the staging domain for easier reference
           staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
           echo "ℹ️ Target staging domain: $staging_domain"
           
           # Execute curl with proper error handling
-          response=$(curl -k -s --show-error -w "\n%{http_code}" -X POST \
+          curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
             -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
@@ -1061,21 +921,7 @@ jobs:
               \"repository_name\": \"${{ github.event.repository.name }}\",
               \"full_domain\": \"$staging_domain\"
             }" \
-            https://deployment-agent.staging.arg.tech/delete-deployed-service)
-          
-          # Extract HTTP status code from the last line
-          http_code=$(echo "$response" | tail -n1)
-          response_body=$(echo "$response" | sed '$d')
-          
-          # Check HTTP status code
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error::❌ API request failed with HTTP status $http_code"
-            echo "$response_body"
-            exit 1
-          fi
-          
-          # Process the SSE stream from the response
-          echo "$response_body" | while IFS= read -r line; do
+            https://deployment-agent.staging.arg.tech/delete-deployed-service | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
