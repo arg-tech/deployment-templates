@@ -36,8 +36,8 @@ jobs:
       - name: Check subdomain and port uniqueness
         id: domain-and-port-checks
         run: |
-          set -euo pipefail
           echo "🌐 Verifying availability of ${{ inputs.full_app_url }} (port ${{ inputs.app_port }}) on ${{ inputs.target_production_server_nickname }}"
+          set -euo pipefail
 
           if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
               resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
@@ -81,8 +81,8 @@ jobs:
       - name: Identify and validate deployment agent
         id: identify-deployment-agent
         run: |
-          set -euo pipefail
           echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
 
           deployment_agent_url="https://deployment-agent.staging.arg.tech"
           echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
@@ -121,8 +121,8 @@ jobs:
       - name: Pull latest code
         id: pull-code
         run: |
-          set -euo pipefail
           echo "📥 Pulling latest code for ${{ github.event.repository.name }} (branch: ${{ github.head_ref }})"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -178,8 +178,8 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          set -euo pipefail
           echo "🔐 Setting up secrets for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           staging_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("STAGING_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
@@ -236,8 +236,8 @@ jobs:
         id: check-main-sync
         if: github.base_ref == 'main'
         run: |
-          set -euo pipefail
           echo "🔄 Checking if ${{ github.head_ref }} is up to date with main"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -291,8 +291,8 @@ jobs:
       - name: Build containers
         id: build-containers
         run: |
-          set -euo pipefail
           echo "🏗️ Building containers for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -351,8 +351,8 @@ jobs:
       - name: Provision new subdomain
         id: provision-subdomain
         run: |
-          set -euo pipefail
           echo "🚀 Provisioning new subdomain for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -490,8 +490,8 @@ jobs:
       - name: Identify and validate deployment agent
         id: identify-deployment-agent
         run: |
-          set -euo pipefail
           echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
           
           case "${{ inputs.target_production_server_nickname }}" in
             "argand") deployment_agent_url="https://deployment-agent.argand.arg.tech"; ;;
@@ -590,8 +590,8 @@ jobs:
       - name: Pull latest code
         id: pull-code-prod
         run: |
-          set -euo pipefail
           echo "📥 Pulling latest code for production deployment of ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -647,8 +647,8 @@ jobs:
         env:
           SECRETS_CONTEXT: ${{ toJson(secrets) }}
         run: |
-          set -euo pipefail
           echo "🔐 Setting up production secrets for ${{ github.event.repository.name }}"
+          set -euo pipefail
 
           production_secrets=$(echo "$SECRETS_CONTEXT" | jq '. | to_entries | map(select(.key | startswith("PRODUCTION_")) | {(.key): .value}) | add // {}' -c)
           request_body=$(jq -n \
@@ -704,9 +704,9 @@ jobs:
       - name: Build containers
         id: build-containers-prod
         run: |
+          echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
           set -euo pipefail
           
-          echo "🏗️ Building production containers for ${{ github.event.repository.name }}"
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -756,8 +756,8 @@ jobs:
       - name: Provision new subdomain
         id: provision-subdomain-prod
         run: |
-          set -euo pipefail
           echo "🚀 Provisioning new subdomain for production (${{ github.event.repository.name }})"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -823,8 +823,8 @@ jobs:
       - name: Forward new subdomain to Godel
         if: ${{ inputs.target_production_server_nickname == 'godel' }}
         run: |
-          set -euo pipefail
           echo "➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)"
+          set -euo pipefail
 
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
@@ -905,8 +905,8 @@ jobs:
       - name: Remove artifacts from staging server
         if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
         run: |
-          set -euo pipefail
           echo "🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}"
+          set -euo pipefail
           
           # Store the staging domain for easier reference
           staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/arg.tech/staging.arg.tech/')
