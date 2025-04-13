@@ -16,6 +16,8 @@ on:
         required: true
       DEPLOYMENT_AGENT_API_KEY_PRODUCTION:
         required: true
+      DEPLOYMENT_AGENT_FORWARD_KEY:
+        required: true
       deploy_user_read_token:
         required: true
 
@@ -829,7 +831,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_FORWARD_KEY }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "${{ inputs.full_app_url }}",
