@@ -498,9 +498,17 @@ jobs:
           set -euo pipefail
           
           case "${{ inputs.target_production_server_nickname }}" in
-            "argand") deployment_agent_url="https://deployment-agent.argand.arg.tech"; ;;
-            "godel") deployment_agent_url="https://deployment-agent.godel.arg.tech"; ;;
-            *) echo "::error::❌ Invalid server nickname"; exit 1 ;;
+            "argand") 
+              deployment_agent_url="https://deployment-agent.argand.arg.tech";
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
+              api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"; ;;
+            "godel") 
+              deployment_agent_url="https://deployment-agent.godel.arg.tech"
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
+              api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"; ;;
+            *) 
+              echo "::error::❌ Invalid server nickname"; 
+              exit 1 ;;
           esac
 
           echo "deployment_agent_url=$deployment_agent_url" >> "$GITHUB_OUTPUT"
@@ -532,33 +540,14 @@ jobs:
             echo "::error::❌ Version mismatch - Required: ${{ env.REQUIRED_VERSION }}, Found: $agent_version"
             exit 1
           fi
+
+          if [[ -z "$api_key" ]]; then
+            echo "::error::❌ No API key found for ${{ inputs.target_production_server_nickname }}. Ensure you've been granted permission to deploy to this server."
+            exit 1
+          echo "secret=$secret" >> "$GITHUB_OUTPUT"
           
           echo "ℹ️ Deployment agent version: $agent_version"
           echo "✅ Deployment agent version check passed"
-
-      - name: Get secret for production server
-        id: get-production-api-key
-        run: |
-          echo "🔑 Retrieving secret for ${{ inputs.target_production_server_nickname }}"
-
-          if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
-              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
-              secret="${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
-          elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
-              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
-              secret="${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
-          else
-              echo "::error::❌ Invalid server nickname: ${{ inputs.target_production_server_nickname }}."
-              exit 1
-          fi
-
-          if [[ -z "$secret" ]]; then
-              echo "::error::❌ No API key found for ${{ inputs.target_production_server_nickname }}. Ensure you've been granted permission to deploy to this server."
-              exit 1
-          fi
-
-          echo "secret=$secret" >> "$GITHUB_OUTPUT"
-          echo "ℹ️ Secret retrieved successfully"
 
       - name: Get PR number
         uses: actions/github-script@v7
@@ -624,7 +613,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
@@ -687,7 +676,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
             -d "$request_body" \
             ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
@@ -739,7 +728,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}"
             }' \
@@ -790,7 +779,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "${{ inputs.full_app_url }}",
@@ -944,7 +933,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
+            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
             -d "{
               \"repository_name\": \"${{ github.event.repository.name }}\",
               \"full_domain\": \"$staging_domain\"
