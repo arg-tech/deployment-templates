@@ -858,7 +858,7 @@ jobs:
               "full_domain": "${{ inputs.full_app_url }}",
               "target_server": "godel"
             }' \
-            ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/forward-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
+            https://deployment-agent.argand.arg.tech/forward-subdomain | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
             
             if [[ $line == data:* ]]; then
