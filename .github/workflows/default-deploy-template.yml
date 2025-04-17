@@ -543,15 +543,21 @@ jobs:
 
           if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
               echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
-              echo "secret=${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}" >> "$GITHUB_OUTPUT"
+              secret="${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
           elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
               echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
-              echo "secret=${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}" >> "$GITHUB_OUTPUT"
+              secret="${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
           else
               echo "::error::❌ Invalid server nickname: ${{ inputs.target_production_server_nickname }}."
-              exit 1;
+              exit 1
           fi
 
+          if [[ -z "$secret" ]]; then
+              echo "::error::❌ No API key found for ${{ inputs.target_production_server_nickname }}. Ensure you've been granted permission to deploy to this server."
+              exit 1
+          fi
+
+          echo "secret=$secret" >> "$GITHUB_OUTPUT"
           echo "ℹ️ Secret retrieved successfully"
 
       - name: Get PR number
