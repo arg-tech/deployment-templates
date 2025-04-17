@@ -544,7 +544,8 @@ jobs:
           if [[ -z "$api_key" ]]; then
             echo "::error::❌ No API key found for ${{ inputs.target_production_server_nickname }}. Ensure you've been granted permission to deploy to this server."
             exit 1
-          echo "secret=$secret" >> "$GITHUB_OUTPUT"
+          fi
+          echo "api_key=$api_key" >> "$GITHUB_OUTPUT"
           
           echo "ℹ️ Deployment agent version: $agent_version"
           echo "✅ Deployment agent version check passed"
