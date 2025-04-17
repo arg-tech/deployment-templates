@@ -28,7 +28,7 @@ env:
   STAGING_WORKFLOW_NAME: Environments / Staging
   PRODUCTION_WORKFLOW_NAME: Environments / Production
   SLACK_CHANNEL_ID: C072R6HPW21
-  REQUIRED_VERSION: "1.1"
+  REQUIRED_VERSION: "1.0"
 
 jobs:
   deploy-staging:
