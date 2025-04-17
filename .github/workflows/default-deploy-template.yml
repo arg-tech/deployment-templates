@@ -946,7 +946,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ steps.identify-deployment-agent.outputs.api_key }}" \
+            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_STAGING }}" \
             -d "{
               \"repository_name\": \"${{ github.event.repository.name }}\",
               \"full_domain\": \"$staging_domain\"
