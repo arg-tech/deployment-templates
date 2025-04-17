@@ -14,10 +14,12 @@ on:
     secrets:
       DEPLOYMENT_AGENT_API_KEY_STAGING:
         required: true
-      DEPLOYMENT_AGENT_API_KEY_PRODUCTION:
-        required: true
+      DEPLOYMENT_AGENT_API_KEY_ARGAND:
+        required: false
+      DEPLOYMENT_AGENT_API_KEY_GODEL:
+        required: false
       DEPLOYMENT_AGENT_FORWARD_KEY:
-        required: true
+        required: false
       deploy_user_read_token:
         required: true
 
@@ -26,7 +28,7 @@ env:
   STAGING_WORKFLOW_NAME: Environments / Staging
   PRODUCTION_WORKFLOW_NAME: Environments / Production
   SLACK_CHANNEL_ID: C072R6HPW21
-  REQUIRED_VERSION: "1.0"
+  REQUIRED_VERSION: "1.1"
 
 jobs:
   deploy-staging:
@@ -534,6 +536,24 @@ jobs:
           echo "ℹ️ Deployment agent version: $agent_version"
           echo "✅ Deployment agent version check passed"
 
+      - name: Get secret for production server
+        id: get-production-api-key
+        run: |
+          echo "🔑 Retrieving secret for ${{ inputs.target_production_server_nickname }}"
+
+          if [[ "${{ inputs.target_production_server_nickname }}" == "argand" ]]; then
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
+              echo "secret=${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
+              echo "secret=${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}" >> "$GITHUB_OUTPUT"
+          else
+              echo "::error::❌ Invalid server nickname: ${{ inputs.target_production_server_nickname }}."
+              exit 1;
+          fi
+
+          echo "ℹ️ Secret retrieved successfully"
+
       - name: Get PR number
         uses: actions/github-script@v7
         id: get-pr-number
@@ -598,7 +618,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
+            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
             -H "Authorization: Bearer ${{ secrets.deploy_user_read_token }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
@@ -661,7 +681,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
+            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
             -d "$request_body" \
             ${{ steps.identify-deployment-agent.outputs.deployment_agent_url }}/create-secrets | while IFS= read -r line || [[ -n "$line" ]]; do
             [ -z "$line" ] && continue
@@ -713,7 +733,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
+            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}"
             }' \
@@ -764,7 +784,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
+            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
             -d '{
               "repository_name": "${{ github.event.repository.name }}",
               "full_domain": "${{ inputs.full_app_url }}",
@@ -918,7 +938,7 @@ jobs:
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
-            -H "X-API-Key: ${{ secrets.DEPLOYMENT_AGENT_API_KEY_PRODUCTION }}" \
+            -H "X-API-Key: ${{ steps.get-production-api-key.outputs.secret }}" \
             -d "{
               \"repository_name\": \"${{ github.event.repository.name }}\",
               \"full_domain\": \"$staging_domain\"
