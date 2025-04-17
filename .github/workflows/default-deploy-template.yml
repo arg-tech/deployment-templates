@@ -844,6 +844,11 @@ jobs:
           echo "➡️ Forwarding ${{ inputs.full_app_url }} to Godel (via deployment agent)"
           set -euo pipefail
 
+          if [[ -z "${{ secrets.DEPLOYMENT_AGENT_FORWARD_KEY }}" ]]; then
+            echo "::error::❌ No forwarding key found. Ensure you've been granted access to the key."
+            exit 1
+          fi
+
           curl -k -N --no-progress-meter --fail -X POST \
             -H "Content-Type: application/json" \
             -H "Accept: text/event-stream" \
