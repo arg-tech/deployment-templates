@@ -348,10 +348,16 @@ jobs:
         run: |
           echo "🔄 Converting production subdomain to staging subdomain"
           
+          # Handle special case for resource-lister
+          if [[ "${{ github.event.repository.name }}" == "resource-lister" ]]; then
+            staging_domain="resource-lister.staging.arg.tech"
+          # Handle special case for logs-agent
+          elif [[ "${{ github.event.repository.name }}" == "dozzle-logs-agent" ]]; then
+            staging_domain="logs-agent.staging.arg.tech"
           # If domain ends with .arg.tech, insert staging. before .arg.tech
-          # Otherwise append .staging.arg.tech to the full domain
-          if [[ "${{ inputs.full_app_url }}" == *.arg.tech ]]; then
+          elif [[ "${{ inputs.full_app_url }}" == *.arg.tech ]]; then
             staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/\.arg\.tech$/.staging.arg.tech/')
+          # Otherwise append .staging.arg.tech to the full domain  
           else
             staging_domain="${{ inputs.full_app_url }}.staging.arg.tech"
           fi
@@ -501,11 +507,6 @@ jobs:
       - name: Identify and validate deployment agent
         id: identify-deployment-agent
         run: |
-          echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
-          set -euo pipefail
-          
-          case "${{ inputs.target_production_server_nickname }}" in
-            "argand") 
               deployment_agent_url="https://deployment-agent.argand.arg.tech";
               echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
               api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"; ;;
