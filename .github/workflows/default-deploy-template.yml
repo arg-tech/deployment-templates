@@ -507,6 +507,11 @@ jobs:
       - name: Identify and validate deployment agent
         id: identify-deployment-agent
         run: |
+          echo "🔍 Identifying deployment agent and checking compatibility (targeting ${{ inputs.target_production_server_nickname }})"
+          set -euo pipefail
+           
+          case "${{ inputs.target_production_server_nickname }}" in
+             "argand")
               deployment_agent_url="https://deployment-agent.argand.arg.tech";
               echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"
               api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_ARGAND }}"; ;;
