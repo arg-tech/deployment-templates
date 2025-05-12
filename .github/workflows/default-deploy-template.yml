@@ -18,6 +18,8 @@ on:
         required: false
       DEPLOYMENT_AGENT_API_KEY_GODEL:
         required: false
+      DEPLOYMENT_AGENT_API_KEY_AIFDB_SERVER:
+        required: false
       DEPLOYMENT_AGENT_FORWARD_KEY:
         required: false
       deploy_user_read_token:
@@ -34,7 +36,7 @@ jobs:
   deploy-staging:
     timeout-minutes: 30
     name: "Staging"
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.repository != 'arg-tech/resource-lister'
     runs-on: ubuntu-latest    
     steps:
       - name: Check subdomain and port uniqueness
@@ -47,6 +49,8 @@ jobs:
               resource_lister_url="http://resource-lister.argand.arg.tech/get-sites"
           elif [[ "${{ inputs.target_production_server_nickname }}" == "godel" ]]; then
               resource_lister_url="http://resource-lister.godel.arg.tech/get-sites"
+          elif [[ "${{ inputs.target_production_server_nickname }}" == "aifdb-server" ]]; then
+              resource_lister_url="http://resource-lister.aifdb-server.arg.tech/get-sites"
           else
               echo "::error::❌ Invalid server nickname: ${{ inputs.target_production_server_nickname }}"
               exit 1;
@@ -354,6 +358,9 @@ jobs:
           # Handle special case for logs-agent
           elif [[ "${{ github.event.repository.name }}" == "dozzle-logs-agent" ]]; then
             staging_domain="logs-agent.staging.arg.tech"
+          # Handle special case for aifdb-corpora
+          elif [[ "${{ github.event.repository.name }}" == "aifdb-corpora" ]]; then
+            staging_domain="corpora.staging.arg.tech"
           # If domain ends with .arg.tech, insert staging. before .arg.tech
           elif [[ "${{ inputs.full_app_url }}" == *.arg.tech ]]; then
             staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/\.arg\.tech$/.staging.arg.tech/')
@@ -519,6 +526,10 @@ jobs:
               deployment_agent_url="https://deployment-agent.godel.arg.tech"
               echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"
               api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_GODEL }}"; ;;
+            "aifdb-server")
+              deployment_agent_url="https://deployment-agent.aifdb-server.arg.tech"
+              echo "::add-mask::${{ secrets.DEPLOYMENT_AGENT_API_KEY_AIFDB_SERVER }}"
+              api_key="${{ secrets.DEPLOYMENT_AGENT_API_KEY_AIFDB_SERVER }}"; ;;
             *) 
               echo "::error::❌ Invalid server nickname"; 
               exit 1 ;;
