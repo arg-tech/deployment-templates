@@ -361,6 +361,9 @@ jobs:
           # Handle special case for aifdb-corpora
           elif [[ "${{ github.event.repository.name }}" == "aifdb-corpora" ]]; then
             staging_domain="corpora.staging.arg.tech"
+          # Handle special case for aifdb-production
+          elif [[ "${{ github.event.repository.name }}" == "aifdb-production" ]]; then
+            staging_domain="aifdb2.staging.arg.tech"
           # If domain ends with .arg.tech, insert staging. before .arg.tech
           elif [[ "${{ inputs.full_app_url }}" == *.arg.tech ]]; then
             staging_domain=$(echo "${{ inputs.full_app_url }}" | sed 's/\.arg\.tech$/.staging.arg.tech/')
