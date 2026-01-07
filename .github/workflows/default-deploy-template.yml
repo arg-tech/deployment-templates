@@ -33,7 +33,183 @@ env:
   REQUIRED_VERSION: "1.0"
 
 jobs:
+  security-checks:
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_name == 'main')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Dockerfile linting with Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          recursive: true
+          failure-threshold: error
+          ignore: DL3008,DL3009
+
+      - name: Check for :latest tags in Compose files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t compose_files < <(
+            find . -type f \( \
+              -name "docker-compose.yml" -o \
+              -name "docker-compose.yaml" -o \
+              -name "compose.yml" -o \
+              -name "compose.yaml" \
+            \) 2>/dev/null
+          )
+          if (( ${#compose_files[@]} == 0 )); then
+            echo "ℹ️ No docker-compose files found."
+            exit 0
+          fi
+
+          latest_found=false
+          for f in "${compose_files[@]}"; do
+            echo "🔍 Checking $f for :latest tags..."
+            if grep -nE 'image:\s*.+:latest(\s|$|")' "$f"; then
+              echo "::error file=$f::❌ $f uses :latest. Pin a specific version tag or digest."
+              latest_found=true
+            fi
+          done
+
+          if [[ "$latest_found" == "true" ]]; then
+            exit 1
+          fi
+          echo "✅ No :latest tags found in Compose files"
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.1
+
+      - name: Build and scan images with Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t compose_files < <(
+            find . -type f \( \
+              -name "docker-compose.yml" -o \
+              -name "docker-compose.yaml" -o \
+              -name "compose.yml" -o \
+              -name "compose.yaml" \
+            \) 2>/dev/null
+          )
+          if (( ${#compose_files[@]} == 0 )); then
+            echo "ℹ️ No docker-compose files found; skipping Trivy scan."
+            exit 0
+          fi
+
+          scan_failed=false
+          scanned_images=()
+
+          for f in "${compose_files[@]}"; do
+            dir=$(dirname "$f")
+            filename=$(basename "$f")
+
+            echo ""
+            echo "📦 Processing $f"
+
+            if grep -qE '^\s+build:' "$f"; then
+              echo "🔨 Building images defined in $f..."
+              if ! (cd "$dir" && docker compose -f "$filename" build); then
+                echo "::error file=$f::❌ Failed to build images from $f"
+                scan_failed=true
+                continue
+              fi
+            fi
+
+            mapfile -t images < <(
+              cd "$dir" && docker compose -f "$filename" config --images 2>/dev/null | sort -u
+            )
+            if (( ${#images[@]} == 0 )); then
+              echo "ℹ️ No images found in $f"
+              continue
+            fi
+
+            for img in "${images[@]}"; do
+              [[ -z "$img" ]] && continue
+
+              # Skip if already scanned (same image in multiple compose files)
+              if [[ " ${scanned_images[*]} " =~ " ${img} " ]]; then
+                echo "⏭️ Skipping $img (already scanned)"
+                continue
+              fi
+              scanned_images+=("$img")
+
+              echo ""
+              echo "🛡️ Scanning $img..."
+
+              # Check if image exists locally first
+              if ! docker image inspect "$img" &>/dev/null; then
+                echo "📥 Pulling $img..."
+                if ! docker pull "$img" 2>/dev/null; then
+                  echo "::warning file=$f::⚠️ Could not pull $img — may be a private or non-existent image"
+                  continue
+                fi
+              fi
+
+              if ! trivy image \
+                --severity HIGH,CRITICAL,MEDIUM \
+                --ignore-unfixed \
+                --exit-code 1 \
+                --quiet \
+                "$img"; then
+                echo "::error::❌ Trivy found vulnerabilities in $img (referenced in $f)"
+                scan_failed=true
+              else
+                echo "✅ $img passed"
+              fi
+            done
+          done
+
+          echo ""
+
+          if [[ "$scan_failed" == "true" ]]; then
+            echo "::error::❌ Security scan failed. Fix the issues above before merging."
+            exit 1
+          fi
+
+          echo "✅ All images passed security scanning"
+
+      - name: Scan local Dockerfiles with Trivy (misconfig)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+
+          files=(**/Dockerfile **/*.Dockerfile)
+
+          if (( ${#files[@]} == 0 )); then
+            echo "ℹ️ No Dockerfiles found; skipping Trivy config scan."
+            exit 0
+          fi
+
+          scan_failed=false
+
+          for f in "${files[@]}"; do
+            echo "🔍 Scanning $f for misconfigurations..."
+            if ! trivy config \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              --quiet \
+              "$f"; then
+              echo "::error file=$f::❌ Trivy found misconfigurations in $f"
+              scan_failed=true
+            else
+              echo "✅ $f passed"
+            fi
+          done
+
+          if [[ "$scan_failed" == "true" ]]; then
+            echo "::error::❌ Dockerfile misconfiguration scan failed."
+            exit 1
+          fi
+
+          echo "✅ All Dockerfiles passed misconfiguration checks"
   deploy-staging:
+    needs: security-checks
     timeout-minutes: 30
     name: "Staging"
     if: github.event_name == 'pull_request' && github.repository != 'arg-tech/resource-lister'
@@ -509,6 +685,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
 
   deploy-production:
+    needs: security-checks
     timeout-minutes: 30
     name: "Production"
     if: github.event_name == 'push' && github.ref_name == 'main'
