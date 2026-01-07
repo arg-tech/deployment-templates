@@ -48,6 +48,24 @@ jobs:
           failure-threshold: error
           ignore: DL3008,DL3009
 
+      - name: Trivy scan repo dependencies
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          vuln-type: "library"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy secrets scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: "secret"
+          exit-code: "1"
+
       - name: Check for :latest tags in Compose files
         shell: bash
         run: |
