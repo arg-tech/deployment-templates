@@ -459,7 +459,7 @@ jobs:
           echo "🔒 Triggering security vulnerability scan on staging"
           curl -k --no-progress-meter --max-time 10 -X POST \
             -H "X-API-Key: $SECURITY_AGENT_KEY" \
-            http://security-agent.staging.arg.tech/api/scan || true
+            http://security-agent.godel.staging.arg.tech/api/scan || true
           echo "✅ Security scan triggered — results will appear on the dashboard shortly"
         env:
           SECURITY_AGENT_KEY: ${{ secrets.SECURITY_AGENT_API_KEY_STAGING }}
