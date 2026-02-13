@@ -954,7 +954,7 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_DEPLOYMENT_BOT_TOKEN }}
       - name: Remove artifacts from staging server
-        if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister'
+        if: github.repository != 'arg-tech/dozzle-logs-agent' && github.repository != 'arg-tech/resource-lister' && github.repository != 'arg-tech/security-agent'
         run: |
           echo "🗑️ Cleaning up staging artifacts for ${{ github.event.repository.name }}"
           set -euo pipefail
