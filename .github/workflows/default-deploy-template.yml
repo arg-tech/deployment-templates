@@ -24,8 +24,6 @@ on:
         required: false
       SECURITY_AGENT_API_KEY_STAGING:
         required: false
-      SECURITY_AGENT_API_KEY_PRODUCTION:
-        required: false
       deploy_user_read_token:
         required: true
 
@@ -459,7 +457,7 @@ jobs:
           echo "🔒 Triggering security vulnerability scan on staging"
           curl -k --no-progress-meter --max-time 10 -X POST \
             -H "X-API-Key: $SECURITY_AGENT_KEY" \
-            http://security-agent.godel.staging.arg.tech/api/scan || true
+            http://security-agent.staging.arg.tech/api/scan || true
           echo "✅ Security scan triggered — results will appear on the dashboard shortly"
         env:
           SECURITY_AGENT_KEY: ${{ secrets.SECURITY_AGENT_API_KEY_STAGING }}
@@ -949,29 +947,6 @@ jobs:
             fi
           done
 
-      - name: Trigger security vulnerability scan
-        continue-on-error: true
-        run: |
-          if [[ -z "$SECURITY_AGENT_KEY" ]]; then
-            echo "ℹ️ No security agent API key configured, skipping scan trigger"
-            exit 0
-          fi
-
-          case "${{ inputs.target_production_server_nickname }}" in
-            "argand") security_agent_url="http://security-agent.argand.arg.tech" ;;
-            "godel") security_agent_url="http://security-agent.godel.arg.tech" ;;
-            "aifdb-server") security_agent_url="http://security-agent.aifdb-server.arg.tech" ;;
-            *) echo "⚠️ Unknown server, skipping scan"; exit 0 ;;
-          esac
-
-          echo "🔒 Triggering security vulnerability scan on ${{ inputs.target_production_server_nickname }}"
-          curl -k --no-progress-meter --max-time 10 -X POST \
-            -H "X-API-Key: $SECURITY_AGENT_KEY" \
-            "$security_agent_url/api/scan" || true
-          echo "✅ Security scan triggered — results will appear on the dashboard shortly"
-        env:
-          SECURITY_AGENT_KEY: ${{ secrets.SECURITY_AGENT_API_KEY_PRODUCTION }}
-
       - name: Comment on PR (finished build)
         uses: actions/github-script@v7
         with:
@@ -986,7 +961,6 @@ jobs:
                 \- Your app's URL: [${{inputs.full_app_url}}](http://${{inputs.full_app_url}})
                 \- Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts
                 \- [View build log](${{steps.get-job-url.outputs.result}})
-                \- 🔒 Security scan triggered — [view results on the dashboard](http://security-agent.${{inputs.target_production_server_nickname}}.arg.tech)
               `
             })
 
