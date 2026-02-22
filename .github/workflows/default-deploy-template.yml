@@ -23,7 +23,7 @@ on:
       DEPLOYMENT_AGENT_FORWARD_KEY:
         required: false
       SECURITY_AGENT_API_KEY_STAGING:
-        required: false
+        required: true
       deploy_user_read_token:
         required: true
 
@@ -446,19 +446,43 @@ jobs:
             fi
           done
 
-      - name: Trigger security vulnerability scan
-        continue-on-error: true
+      - name: Security vulnerability scan
+        id: security-scan
         run: |
-          if [[ -z "$SECURITY_AGENT_KEY" ]]; then
-            echo "ℹ️ No security agent API key configured, skipping scan trigger"
+          echo "🔒 Scanning ${{ github.event.repository.name }} for security vulnerabilities"
+
+          http_code=$(curl -k -s -o /tmp/scan_response.json -w "%{http_code}" \
+            --max-time 45 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $SECURITY_AGENT_KEY" \
+            -d "{\"repository\": \"${{ github.event.repository.name }}\"}" \
+            http://security-agent.staging.arg.tech/api/scan/repository 2>/dev/null) || {
+            echo "::warning::⚠️ Security scan did not complete within 45 seconds. Check the dashboard manually: http://security-agent.staging.arg.tech"
+            exit 0
+          }
+
+          if [[ "$http_code" -ne 200 ]]; then
+            echo "::warning::⚠️ Security scan returned HTTP $http_code. Check the dashboard manually: http://security-agent.staging.arg.tech"
             exit 0
           fi
 
-          echo "🔒 Triggering security vulnerability scan on staging"
-          curl -k --no-progress-meter --max-time 10 -X POST \
-            -H "X-API-Key: $SECURITY_AGENT_KEY" \
-            http://security-agent.staging.arg.tech/api/scan || true
-          echo "✅ Security scan triggered — results will appear on the dashboard shortly"
+          total_p0=$(jq -r '.total_p0 // 0' /tmp/scan_response.json)
+          total_p1=$(jq -r '.total_p1 // 0' /tmp/scan_response.json)
+          total_high_priority=$((total_p0 + total_p1))
+
+          echo "scan_high_priority=$total_high_priority" >> "$GITHUB_OUTPUT"
+
+          if [[ "$total_high_priority" -gt 0 ]]; then
+            echo ""
+            echo "🚨 Found $total_high_priority high-priority security vulnerabilities:"
+            jq -r '.vulnerabilities[] | "  - \(.vulnerability_id) in \(.pkg_name) (\(.installed_version) → \(.fixed_version // "no fix"))"' /tmp/scan_response.json
+            echo ""
+            echo "::error::❌ Deployment blocked: $total_high_priority high-priority security vulnerabilities detected. Review them on the dashboard: http://security-agent.staging.arg.tech"
+            exit 1
+          fi
+
+          echo "✅ Security scan passed — no high-priority vulnerabilities found"
         env:
           SECURITY_AGENT_KEY: ${{ secrets.SECURITY_AGENT_API_KEY_STAGING }}
 
@@ -499,7 +523,7 @@ jobs:
                   \- Test it on the staging URL: [${{steps.convert-subdomain.outputs.staging_domain}}](http://${{steps.convert-subdomain.outputs.staging_domain}})
                   \- If you update the PR or create another one, a new build will be created, replacing this one
                   \- [View build log](${{steps.get-job-url.outputs.result}})
-                  \- 🔒 Security scan triggered — [view results on the dashboard](http://security-agent.staging.arg.tech)
+                  \- 🔒 Security scan passed — [view full results on the dashboard](http://security-agent.staging.arg.tech)
 
               **Note:** If this PR is to main, only authorized users will be allowed to merge. Once merged to main, the build will be promoted to the production server. Ensure the staging build works correctly before merging.
               `
