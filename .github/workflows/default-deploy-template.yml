@@ -22,6 +22,8 @@ on:
         required: false
       DEPLOYMENT_AGENT_FORWARD_KEY:
         required: false
+      SECURITY_AGENT_API_KEY_STAGING:
+        required: true
       deploy_user_read_token:
         required: true
 
@@ -443,6 +445,49 @@ jobs:
             fi
           done
 
+      - name: Security vulnerability scan
+        id: security-scan
+        run: |
+          echo "🔒 Scanning ${{ github.event.repository.name }} for security vulnerabilities"
+
+          http_code=$(curl -k -s -o /tmp/scan_response.json -w "%{http_code}" \
+            --max-time 60 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $SECURITY_AGENT_KEY" \
+            -d "{\"repository\": \"${{ github.event.repository.name }}\"}" \
+            http://security-agent.staging.arg.tech/api/scan/repository 2>/dev/null) || {
+            echo "::warning::⚠️ Security scan did not complete in time. Check the dashboard manually: http://security-agent.staging.arg.tech"
+            echo "scan_result=timeout" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [[ "$http_code" -ne 200 ]]; then
+            echo "::warning::⚠️ Security scan returned HTTP $http_code. Check the dashboard manually: http://security-agent.staging.arg.tech"
+            echo "scan_result=timeout" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          total_p0=$(jq -r '.total_p0 // 0' /tmp/scan_response.json)
+          total_p1=$(jq -r '.total_p1 // 0' /tmp/scan_response.json)
+          total_high_priority=$((total_p0 + total_p1))
+
+          echo "scan_high_priority=$total_high_priority" >> "$GITHUB_OUTPUT"
+
+          if [[ "$total_high_priority" -gt 0 ]]; then
+            echo ""
+            echo "🚨 Found $total_high_priority high-priority security vulnerabilities:"
+            jq -r '.vulnerabilities[] | "  - \(.vulnerability_id) in \(.pkg_name) (\(.installed_version) → \(.fixed_version // "no fix"))"' /tmp/scan_response.json
+            echo ""
+            echo "::error::❌ Deployment blocked: $total_high_priority high-priority security vulnerabilities detected. Review them on the dashboard: http://security-agent.staging.arg.tech"
+            exit 1
+          fi
+
+          echo "scan_result=passed" >> "$GITHUB_OUTPUT"
+          echo "✅ Security scan passed — no high-priority vulnerabilities found"
+        env:
+          SECURITY_AGENT_KEY: ${{ secrets.SECURITY_AGENT_API_KEY_STAGING }}
+
       - name: Get build details URL
         uses: actions/github-script@v7
         continue-on-error: true
@@ -480,8 +525,9 @@ jobs:
                   \- Test it on the staging URL: [${{steps.convert-subdomain.outputs.staging_domain}}](http://${{steps.convert-subdomain.outputs.staging_domain}})
                   \- If you update the PR or create another one, a new build will be created, replacing this one
                   \- [View build log](${{steps.get-job-url.outputs.result}})
-                      
-              **Note:** If this PR is to main, only authorized users will be allowed to merge. Once merged to main, the build will be promoted to the production server. Ensure the staging build works correctly before merging. 
+                  \- ${ '${{steps.security-scan.outputs.scan_result}}' === 'timeout' ? '⚠️ Security scan did not complete in time — [check the dashboard manually](http://security-agent.staging.arg.tech)' : '🔒 Security scan passed — [view full results on the dashboard](http://security-agent.staging.arg.tech)' }
+
+              **Note:** If this PR is to main, only authorized users will be allowed to merge. Once merged to main, the build will be promoted to the production server. Ensure the staging build works correctly before merging.
               `
             return message;
 
@@ -935,8 +981,8 @@ jobs:
               issue_number: ${{steps.get-pr-number.outputs.result}},
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: ` 
-              **Build deployed to production** 🏠 
+              body: `
+              **Build deployed to production** 🏠
                 \- Target server: ${{inputs.target_production_server_nickname}}
                 \- Your app's URL: [${{inputs.full_app_url}}](http://${{inputs.full_app_url}})
                 \- Tip: delete the source branch, and for future work create a fresh one from main to avoid merge conflicts
