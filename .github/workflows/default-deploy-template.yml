@@ -451,7 +451,7 @@ jobs:
           echo "🔒 Scanning ${{ github.event.repository.name }} for security vulnerabilities"
 
           http_code=$(curl -k -s -o /tmp/scan_response.json -w "%{http_code}" \
-            --max-time 60 \
+            --max-time 180 \
             -X POST \
             -H "Content-Type: application/json" \
             -H "X-API-Key: $SECURITY_AGENT_KEY" \
